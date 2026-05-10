@@ -106,21 +106,19 @@ def _seed_iteration(iteration_id: str = "iter-1",
     """
     import sm
     if requirements is None:
+        # Seed req-1 through req-5 so _canonical_agent_output(n) for n in 1..5
+        # works without surfacing unknown requirement_ids (Story 10's cross-ref
+        # check would correctly flag references to unseeded ids).
+        priorities = ["MUST", "SHOULD", "NICE", "MUST", "SHOULD"]
         requirements = [
             {
-                "requirement_id": "req-1",
-                "title": "Title 1",
-                "description": "Description 1.",
-                "priority": "MUST",
-                "acceptance_criteria": "AC1",
-            },
-            {
-                "requirement_id": "req-2",
-                "title": "Title 2",
-                "description": "Description 2.",
-                "priority": "SHOULD",
-                "acceptance_criteria": "AC2",
-            },
+                "requirement_id": f"req-{i}",
+                "title": f"Title {i}",
+                "description": f"Description {i}.",
+                "priority": priorities[i - 1],
+                "acceptance_criteria": f"AC{i}",
+            }
+            for i in range(1, 6)
         ]
     entry = sm.build_entry("iteration_open", {
         "iteration_id": iteration_id,
@@ -1292,7 +1290,20 @@ def test_spawn_agent_receives_active_iteration_requirements(isolated_log):
          "priority": "SHOULD", "acceptance_criteria": "ACB"},
     ]
     _seed_iteration(requirements=reqs)
-    spawn, captured = _capturing_spawn(_canonical_agent_output())
+    # Custom agent output referencing only the seeded requirement_ids
+    # (req-A / req-B), so Story 10's cross-ref check stays clean while
+    # the assertion verifies spawn_agent received the seeded requirements list.
+    custom_output = {
+        "stories": [
+            {"sequence": 1, "title": "Story 1", "size": "S",
+             "requirement_ids": ["req-A"],
+             "acceptance_criteria": "Story 1 must pass its tests."},
+            {"sequence": 2, "title": "Story 2", "size": "M",
+             "requirement_ids": ["req-B"],
+             "acceptance_criteria": "Story 2 must pass its tests."},
+        ]
+    }
+    spawn, captured = _capturing_spawn(custom_output)
     sm.decompose(spawn_agent=spawn)
     assert captured["requirements"] == reqs, (
         f"spawn_agent must receive the active iteration's requirements;\n"
