@@ -4,18 +4,23 @@ A scrum-master pipeline tool: reads a product-owner iteration handoff,
 drives requirement-to-story decomposition, manages the per-story
 test-writer → coder → reviewer pipeline. Single JSONL log, append-only.
 
-**Status: Sprint 1 shipped (2026-05-10) — Sprint 2 deferred.** Iteration
-1 is half-shipped: the foundation, ingestion, decomposition, and
-sprint-cut commands are in production. Lifecycle / status / close
-land in Sprint 2.
+**Status: Iteration 1 SHIPPED 2026-05-10.** All 23 stories across two
+sprints delivered. v0.3.0 tagged.
 
-- 12 of 12 Sprint 1 stories shipped
-- 942 tests across 13 files, 100% green
-- 4 of 4 L stories first-pass implementation-clean
-- 1 push-back fire (resolved); 11 stories first-pass with zero push-back
+- **23 of 23 Iter 1 stories shipped** in two recorded build sessions
+- **1680 tests** across 23 files, 100% green
+- **7 of 7 L stories** first-pass implementation-clean
+- 1 push-back fire (resolved) + 2 schema-extension cascades
+  (behavior-preserving fixture extensions)
+- 3 verification-only stories (Sprint 2 audits) — prior stories
+  already implemented; tests lock the contracts
 
-See [`iter1/Sprint_1_Retro.md`](iter1/Sprint_1_Retro.md) for full
-sprint stats and retro.
+Recorded live across two recording sessions on 2026-05-10. The
+unedited build recordings are public artifacts.
+
+See [`iter1/Sprint_1_Retro.md`](iter1/Sprint_1_Retro.md) and
+[`iter1/Iter_1_Retro.md`](iter1/Iter_1_Retro.md) for full stats
+and retro.
 
 Part of a small development suite shaped on the same patterns:
 
