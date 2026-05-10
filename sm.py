@@ -14,7 +14,7 @@ import hashlib as _hashlib
 import json
 import uuid
 from pathlib import Path
-from typing import Iterator
+from typing import Callable, Iterator, Optional
 
 _CANONICAL_ROLES = ("sm_agent", "test_writer", "coder", "reviewer")
 
@@ -44,6 +44,9 @@ __all__ = [
     "IngestActiveError",
     "resolve_role_spec",
     "RoleSpecNotFoundError",
+    "decompose",
+    "DecomposeOutputParseError",
+    "DecomposeOutputShapeError",
 ]
 
 
@@ -77,6 +80,30 @@ class RoleSpecNotFoundError(FileNotFoundError):
     """Raised when a canonical role-spec file does not exist on disk at the
     resolved path. Subclasses FileNotFoundError so existing
     `except FileNotFoundError` callers keep working."""
+
+
+# ---------------------------------------------------------------------------
+# Story 9 — typed decompose errors. Both narrow ValueError so existing
+# `except ValueError` callers keep working, while distinguishing the parse
+# failure mode (agent output isn't valid JSON) from the shape failure mode
+# (JSON parsed but doesn't match the required schema).
+# ---------------------------------------------------------------------------
+
+class DecomposeAgentError(RuntimeError):
+    """Raised when spawn_agent itself errors and the failure should be
+    surfaced as a typed decompose-domain exception. Currently unused by the
+    happy-path implementation (which lets the agent's exception propagate
+    verbatim); reserved for future wrapping behavior."""
+
+
+class DecomposeOutputParseError(ValueError):
+    """The agent returned output that is not valid JSON."""
+
+
+class DecomposeOutputShapeError(ValueError):
+    """The agent's JSON parsed cleanly, but does not match the required
+    story-backlog schema (missing keys, wrong types, bad sizes, non-1..N
+    sequences, etc.)."""
 
 
 def resolve_role_spec(role: str) -> Path:
@@ -320,7 +347,7 @@ def derive_state() -> dict:
                 "force_closed_count": entry.get("force_closed_count", 0),
             }
 
-        elif etype == "story_decomposed":
+        elif etype == "story_decomposed" or etype == "story_backlog":
             stories = entry.get("stories", [])
             new_backlog = sorted(
                 (_copy.deepcopy(s) for s in stories),
@@ -479,6 +506,159 @@ def ingest(path) -> dict:
     return entry
 
 
+def decompose(spawn_agent: Optional[Callable] = None) -> dict:
+    """Spawn an SM Agent (or an injected stub) to decompose the active
+    iteration's requirements into a sequence of stories, then write a single
+    `story_backlog` log entry on success.
+
+    Story 9 contract:
+
+      - `spawn_agent` defaults to `None`; passing `None` (explicit or
+        implicit) raises `NotImplementedError` mentioning Iter 2.
+        Operators / tests inject a callable to drive the function in Iter 1.
+
+      - Reads the active iteration via `derive_state()`. No active
+        iteration → `ValueError("no active iteration; ingest a handoff
+        first")`. No log write.
+
+      - Resolves the SM Agent role-spec via `resolve_role_spec("sm_agent")`
+        and computes the role-spec hash via `_role_spec_hash("sm_agent")`.
+
+      - Calls `spawn_agent(role_spec_path: str, requirements: list[dict])`
+        synchronously (blocks until the agent returns).
+
+      - Parses the agent's JSON output. Parse failure raises
+        `DecomposeOutputParseError`. Shape failure raises
+        `DecomposeOutputShapeError`. Either way: NO log write. If the
+        spawn_agent callable itself raises, that exception propagates
+        verbatim and the log is unchanged.
+
+      - On success: assigns each story a fresh uuid4-hex `story_id` (the
+        operator's job, not the agent's — any agent-supplied `story_id` is
+        overridden), then writes a single `story_backlog` log entry via
+        `build_entry` + `_append_entry`. Returns the entry dict.
+    """
+    if spawn_agent is None:
+        raise NotImplementedError(
+            "real agent integration ships in Iter 2 — pass spawn_agent= "
+            "for testing/manual ops"
+        )
+
+    state = derive_state()
+    if state["active_iteration"] is None:
+        raise ValueError("no active iteration; ingest a handoff first")
+
+    iteration = state["active_iteration"]
+    requirements = iteration["requirements"]
+
+    role_spec_path = resolve_role_spec("sm_agent")
+    role_spec_hash = _role_spec_hash("sm_agent")
+
+    # Synchronous call — blocks until the agent returns. Any exception the
+    # callable raises propagates verbatim (no log write).
+    output_str = spawn_agent(str(role_spec_path), requirements)
+
+    # --- Parse JSON ---
+    try:
+        output = json.loads(output_str)
+    except (json.JSONDecodeError, TypeError) as e:
+        raise DecomposeOutputParseError(
+            f"agent output is not valid JSON: {e}"
+        ) from e
+
+    # --- Validate top-level shape ---
+    if not isinstance(output, dict):
+        raise DecomposeOutputShapeError(
+            f"agent output must be a JSON object, got "
+            f"{output.__class__.__name__}"
+        )
+    if "stories" not in output:
+        raise DecomposeOutputShapeError(
+            "agent output missing required 'stories' key"
+        )
+    stories = output["stories"]
+    if not isinstance(stories, list):
+        raise DecomposeOutputShapeError(
+            f"'stories' must be a list, got "
+            f"{stories.__class__.__name__}"
+        )
+    if len(stories) == 0:
+        raise DecomposeOutputShapeError("'stories' must be non-empty")
+
+    REQUIRED_FIELDS = (
+        "sequence",
+        "title",
+        "size",
+        "requirement_ids",
+        "acceptance_criteria",
+    )
+    VALID_SIZES = {"S", "M", "L"}
+
+    # --- Per-story shape validation ---
+    for idx, s in enumerate(stories):
+        if not isinstance(s, dict):
+            raise DecomposeOutputShapeError(
+                f"story at index {idx} must be a dict, got "
+                f"{s.__class__.__name__}"
+            )
+        for field in REQUIRED_FIELDS:
+            if field not in s:
+                raise DecomposeOutputShapeError(
+                    f"story at index {idx} missing required field "
+                    f"{field!r}"
+                )
+        # size validation
+        if s["size"] not in VALID_SIZES:
+            raise DecomposeOutputShapeError(
+                f"story at index {idx} has invalid size {s['size']!r}; "
+                f"must be one of {sorted(VALID_SIZES)!r}"
+            )
+        # requirement_ids validation
+        rids = s["requirement_ids"]
+        if not isinstance(rids, list):
+            raise DecomposeOutputShapeError(
+                f"story at index {idx} requirement_ids must be a list, "
+                f"got {rids.__class__.__name__}"
+            )
+        if len(rids) == 0:
+            raise DecomposeOutputShapeError(
+                f"story at index {idx} requirement_ids must be non-empty"
+            )
+        if not all(isinstance(r, str) for r in rids):
+            raise DecomposeOutputShapeError(
+                f"story at index {idx} requirement_ids must be a list of "
+                f"strings"
+            )
+
+    # --- Sequence validation: must be exactly 1..N strictly increasing ---
+    sequences = [s["sequence"] for s in stories]
+    expected = list(range(1, len(stories) + 1))
+    if sequences != expected:
+        raise DecomposeOutputShapeError(
+            f"sequences must be strictly 1..N, got {sequences!r} "
+            f"(expected {expected!r})"
+        )
+
+    # --- Mint story_ids (override any agent-supplied id) ---
+    enriched_stories = []
+    for s in stories:
+        new_s = dict(s)
+        new_s["story_id"] = uuid.uuid4().hex
+        enriched_stories.append(new_s)
+
+    # --- Build + append the entry ---
+    entry = build_entry(
+        "story_backlog",
+        {
+            "stories": enriched_stories,
+            "role_spec_path": str(role_spec_path),
+            "role_spec_hash": role_spec_hash,
+        },
+    )
+    _append_entry(entry)
+    return entry
+
+
 # ---------------------------------------------------------------------------
 # CLI surface — `python -m sm <command> <args...>`
 # ---------------------------------------------------------------------------
@@ -520,6 +700,8 @@ def _cli_main(argv: list) -> int:
         0 success, 1 other, 2 path, 3 json, 4 shape, 5 dup-id,
         6 single-active.
     """
+    global LOG_PATH
+
     import os
     import sys as _sys
 
@@ -531,6 +713,33 @@ def _cli_main(argv: list) -> int:
 
     if cmd in ("--help", "-h", "help"):
         print(_HELP_TEXT)
+        return EXIT_OK
+
+    if cmd == "decompose":
+        # Honor SM_LOG_PATH for hermetic subprocess testing.
+        env_log = os.environ.get("SM_LOG_PATH")
+        if env_log:
+            LOG_PATH = Path(env_log)
+
+        try:
+            entry = decompose()
+        except NotImplementedError as e:
+            print(f"error: {e}", file=_sys.stderr)
+            return EXIT_OTHER
+        except DecomposeOutputParseError as e:
+            print(f"error: {e}", file=_sys.stderr)
+            return EXIT_JSON
+        except DecomposeOutputShapeError as e:
+            print(f"error: {e}", file=_sys.stderr)
+            return EXIT_SHAPE
+        except ValueError as e:
+            print(f"error: {e}", file=_sys.stderr)
+            return EXIT_OTHER
+        except Exception as e:  # noqa: BLE001 — catch-all
+            print(f"error: {e}", file=_sys.stderr)
+            return EXIT_OTHER
+
+        print(entry["id"])
         return EXIT_OK
 
     if cmd == "ingest":
@@ -546,7 +755,6 @@ def _cli_main(argv: list) -> int:
         # hermetic and the package's real log isn't touched.
         env_log = os.environ.get("SM_LOG_PATH")
         if env_log:
-            global LOG_PATH
             LOG_PATH = Path(env_log)
 
         try:
