@@ -306,7 +306,7 @@ def test_one_json_object_per_line(isolated_log):
     import sm
     for i in range(5):
         sm._append_entry({"i": i})
-    raw = isolated_log.read_text(encoding="utf-8", newline="")
+    raw = isolated_log.read_bytes().decode("utf-8")
     chunks = raw.split("\n")
     # Last chunk is empty (trailing LF).
     assert chunks[-1] == ""
