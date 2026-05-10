@@ -1164,6 +1164,51 @@ def _cli_main(argv: list) -> int:
         print(entry["iteration_id"])
         return EXIT_OK
 
+    # Story 14 — per-story lifecycle subcommands.
+    # Each routes to `transition_story(story_id, <target>)` with a fixed
+    # target state. The four are isomorphic: same shape of arg validation,
+    # same exception → exit code mapping, same success/failure surface.
+    _LIFECYCLE_TARGETS = {
+        "start": "in_progress",
+        "submit": "in_review",
+        "accept": "accepted",
+        "reject": "rejected",
+    }
+
+    if cmd in _LIFECYCLE_TARGETS:
+        target_state = _LIFECYCLE_TARGETS[cmd]
+
+        if len(argv) >= 2 and argv[1] in ("--help", "-h"):
+            print(_HELP_TEXT)
+            return EXIT_OK
+        if len(argv) != 2:
+            print(
+                f"usage: python -m sm {cmd} <story_id>", file=_sys.stderr
+            )
+            return EXIT_OTHER
+
+        story_id = argv[1]
+
+        # Honor SM_LOG_PATH for hermetic subprocess testing.
+        env_log = os.environ.get("SM_LOG_PATH")
+        if env_log:
+            LOG_PATH = Path(env_log)
+
+        try:
+            transition_story(story_id, target_state)
+        except StoryTransitionError as e:
+            print(f"error: {e}", file=_sys.stderr)
+            return EXIT_TRANSITION
+        except (TypeError, ValueError) as e:
+            print(f"error: {e}", file=_sys.stderr)
+            return EXIT_OTHER
+        except Exception as e:  # noqa: BLE001 — catch-all
+            print(f"error: {e}", file=_sys.stderr)
+            return EXIT_OTHER
+
+        print(f"story {story_id} -> {target_state}")
+        return EXIT_OK
+
     print(f"unknown command: {cmd!r}", file=_sys.stderr)
     print(_HELP_TEXT, file=_sys.stderr)
     return EXIT_OTHER
