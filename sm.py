@@ -50,6 +50,7 @@ __all__ = [
     "DecomposeUnknownRequirementError",
     "sprint_cut",
     "SprintCutError",
+    "SprintCutLockedError",
 ]
 
 
@@ -126,6 +127,20 @@ class DecomposeUnknownRequirementError(ValueError):
 class SprintCutError(ValueError):
     """Raised when sprint_cut command fails: no active iteration, no story
     backlog yet, or N out of range (zero, negative, or > len(backlog))."""
+
+
+# ---------------------------------------------------------------------------
+# Story 12 — sprint-cut re-run lock once any in-sprint story leaves planned.
+# Subclasses SprintCutError so existing `except SprintCutError` callers (and
+# the CLI handler that maps it to EXIT_SPRINT_CUT) keep catching it, while
+# allowing branch-on-class for "this re-cut is locked, not just any failure".
+# ---------------------------------------------------------------------------
+
+class SprintCutLockedError(SprintCutError):
+    """Raised when re-cut is attempted after any in-sprint story (per the
+    LATEST prior sprint_cut entry's in_sprint_story_ids) has left the
+    `planned` state. Lock is replay-derived — no separate flag persisted.
+    Operator must close or force-close the iteration to proceed."""
 
 
 def resolve_role_spec(role: str) -> Path:
@@ -765,6 +780,30 @@ def sprint_cut(n: int) -> dict:
         raise SprintCutError(
             f"position {n} exceeds backlog length {L}"
         )
+
+    # Story 12 — re-cut lock check. After all type/state/range validation
+    # passes, scan the log for the LATEST prior sprint_cut entry. If one
+    # exists, this is a re-cut: any in-sprint story (per that entry's
+    # in_sprint_story_ids) whose state has left "planned" locks the cut.
+    # Lock is replay-derived from `state` already in hand — no separate
+    # flag is persisted, and no log write happens on failure.
+    latest_prior_in_sprint = None
+    for entry in read_entries():
+        if entry.get("type") == "sprint_cut":
+            latest_prior_in_sprint = entry.get("in_sprint_story_ids", [])
+
+    if latest_prior_in_sprint is not None:
+        story_states = state["story_states"]
+        offenders = [
+            sid for sid in latest_prior_in_sprint
+            if story_states.get(sid, "planned") != "planned"
+        ]
+        if offenders:
+            raise SprintCutLockedError(
+                f"sprint cut locked — these in-sprint stories have left "
+                f"planned state: {offenders!r}; close or force-close the "
+                f"iteration before re-cutting"
+            )
 
     # Build the cut: stories 1..N in sprint, N+1..L deferred. derive_state
     # already returns the backlog sorted by sequence, so slicing preserves
