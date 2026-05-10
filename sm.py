@@ -62,6 +62,8 @@ __all__ = [
     "close_iteration",
     "IterationCloseError",
     "EXIT_CLOSE",
+    "force_close",
+    "ForceCloseError",
 ]
 
 
@@ -219,6 +221,20 @@ class IterationCloseError(ValueError):
     active iteration, no story backlog, no sprint_cut, or one-or-more
     in-sprint stories still in a non-terminal state. Subclasses ValueError
     so existing `except ValueError` callers keep working."""
+
+
+# ---------------------------------------------------------------------------
+# Story 19 — typed force-close error. Subclasses ValueError so existing
+# `except ValueError` callers keep working, while the CLI maps the class to
+# EXIT_CLOSE (force-close is a close variant). Raised by force_close on
+# every validation failure (empty/whitespace reason, no active iteration,
+# no backlog, no sprint_cut).
+# ---------------------------------------------------------------------------
+
+class ForceCloseError(ValueError):
+    """Raised when force_close cannot proceed: empty/whitespace-only reason,
+    no active iteration, no story backlog, or no sprint_cut. Subclasses
+    ValueError so existing `except ValueError` callers keep working."""
 
 
 # Story 13 graph — exposes only the operator-driven transitions. The
@@ -1551,6 +1567,132 @@ def close_iteration(
 
 
 # ---------------------------------------------------------------------------
+# Story 19 — force-close. Public `force_close(reason)` transitions every
+# non-terminal in-sprint story to `force_closed` (bypassing Story 13's
+# narrow operator-only writer graph), then calls close_iteration with
+# closed_by="force-close" + reason to produce the close-handoff entry and
+# sidecar via Story 18's path.
+# ---------------------------------------------------------------------------
+
+
+def _force_close_story(story_id: str, current_state: str, reason: str) -> dict:
+    """Private writer for force_closed transitions — bypasses Story 13's
+    narrow operator-only transition graph (which does NOT include
+    force_closed). The `_VALID_TRANSITIONS` graph (used by `derive_state`
+    replay) DOES allow every non-terminal -> force_closed, so the resulting
+    state_change entry replays cleanly.
+
+    Appends a single `story_state_change` entry. Returns the appended dict.
+    No validation here — `force_close` owns the gate.
+    """
+    entry = build_entry(
+        "story_state_change",
+        {
+            "story_id": story_id,
+            "from_state": current_state,
+            "to_state": "force_closed",
+            "notes": f"force-close: {reason}",
+        },
+    )
+    _append_entry(entry)
+    return entry
+
+
+def force_close(reason: str) -> dict:
+    """Force-close the active iteration with a mandatory operator-supplied
+    `reason`.
+
+    Story 19 contract:
+
+      - Validation (raises BEFORE any log write; log byte-for-byte
+        unchanged on every failure path; no handoff JSON file appears):
+            * non-string reason -> TypeError
+            * empty / whitespace-only reason -> ForceCloseError
+            * no active iteration -> ForceCloseError
+            * no story_backlog -> ForceCloseError
+            * no sprint_cut yet -> ForceCloseError
+
+      - On success: every in-sprint story whose current lifecycle state is
+        NOT in {accepted, rejected, force_closed} receives a single
+        `story_state_change` entry transitioning it to `force_closed`
+        (via `_force_close_story`). Already-terminal stories are NOT
+        re-transitioned. Then `close_iteration(closed_by="force-close",
+        reason=<verbatim>)` runs to produce the handoff sidecar and the
+        iteration_close log entry.
+
+      - Returns the `iteration_close` entry dict (the final appended log
+        entry).
+
+      - Failure invariant: when validation fails, neither
+        `_force_close_story` nor `close_iteration` is invoked, so no log
+        write or handoff file occurs.
+    """
+    # --- Reason type check (TypeError, before any state read). ---
+    if not isinstance(reason, str):
+        raise TypeError(
+            f"reason must be a string, got {reason.__class__.__name__}"
+        )
+
+    # --- Reason emptiness check (ForceCloseError, before any state read).
+    if not reason or not reason.strip():
+        raise ForceCloseError(
+            "reason must be non-empty and not whitespace-only"
+        )
+
+    # --- Replay state (pure read; no log write). ---
+    state = derive_state()
+
+    # --- Pre-condition cascade. Each raises ForceCloseError with no log
+    # write and no handoff file. Order matches close_iteration so the
+    # operator sees consistent error semantics across the two paths.
+    if state["active_iteration"] is None:
+        raise ForceCloseError(
+            "no active iteration; nothing to force-close"
+        )
+
+    if not state["story_backlog"]:
+        raise ForceCloseError(
+            "no story backlog yet; run decompose before force-closing the "
+            "iteration"
+        )
+
+    if state["sprint_cut"] is None:
+        raise ForceCloseError(
+            "no sprint_cut yet; cut the sprint before force-closing the "
+            "iteration"
+        )
+
+    # --- Find the LATEST sprint_cut entry's in_sprint_story_ids. The
+    # derive_state dict carries the cut position but not the id list, so
+    # do a targeted log scan.
+    in_sprint_ids: list = []
+    for entry in read_entries():
+        if entry.get("type") == "sprint_cut":
+            in_sprint_ids = entry.get("in_sprint_story_ids", []) or []
+
+    # --- Identify non-terminal in-sprint stories. Already-terminal stories
+    # (accepted / rejected / force_closed) are skipped — no duplicate
+    # state_change entry is written for them.
+    story_states = state["story_states"]
+    non_terminal: list = []
+    for sid in in_sprint_ids:
+        cur = story_states.get(sid, "planned")
+        if cur not in _TERMINAL_STATES:
+            non_terminal.append((sid, cur))
+
+    # --- Transition each non-terminal story to force_closed. After this
+    # loop the log carries one new story_state_change entry per non-
+    # terminal story; close_iteration's own replay will pick them up and
+    # see every in-sprint story as terminal.
+    for sid, current in non_terminal:
+        _force_close_story(sid, current, reason)
+
+    # --- Hand off to close_iteration to produce the iteration_close entry
+    # and the handoff JSON sidecar. closed_by + reason flow through.
+    return close_iteration(closed_by="force-close", reason=reason)
+
+
+# ---------------------------------------------------------------------------
 # CLI surface — `python -m sm <command> <args...>`
 # ---------------------------------------------------------------------------
 
@@ -1908,6 +2050,68 @@ def _cli_main(argv: list) -> int:
         except IterationCloseError as e:
             print(f"error: {e}", file=_sys.stderr)
             return EXIT_CLOSE
+        except Exception as e:  # noqa: BLE001 — catch-all
+            print(f"error: {e}", file=_sys.stderr)
+            return EXIT_OTHER
+
+        print(entry["id"])
+        return EXIT_OK
+
+    # Story 19 — force-close iteration subcommand. Args:
+    #   force-close --reason <text>
+    # Exit codes:
+    #   EXIT_OK     on success
+    #   EXIT_CLOSE  on ForceCloseError (validation failure — empty reason,
+    #               no active iter, no backlog, no cut). Force-close is a
+    #               close variant; reuses EXIT_CLOSE.
+    #   EXIT_OTHER  on missing flag / bad args / unexpected errors
+    if cmd == "force-close":
+        if len(argv) >= 2 and argv[1] in ("--help", "-h"):
+            print(_HELP_TEXT)
+            return EXIT_OK
+
+        # Honor SM_LOG_PATH for hermetic subprocess testing.
+        env_log = os.environ.get("SM_LOG_PATH")
+        if env_log:
+            LOG_PATH = Path(env_log)
+
+        # Parse --reason <text>. No positional form; the flag is the only
+        # path so the empty case is unambiguous.
+        reason: Optional[str] = None
+        i = 1
+        while i < len(argv):
+            tok = argv[i]
+            if tok == "--reason":
+                if i + 1 >= len(argv):
+                    print(
+                        "error: --reason requires a value",
+                        file=_sys.stderr,
+                    )
+                    return EXIT_OTHER
+                reason = argv[i + 1]
+                i += 2
+            else:
+                print(
+                    f"error: unexpected argument {tok!r}",
+                    file=_sys.stderr,
+                )
+                return EXIT_OTHER
+
+        if reason is None:
+            print(
+                "usage: python -m sm force-close --reason <text>",
+                file=_sys.stderr,
+            )
+            return EXIT_OTHER
+
+        try:
+            entry = force_close(reason)
+        except ForceCloseError as e:
+            print(f"error: {e}", file=_sys.stderr)
+            return EXIT_CLOSE
+        except TypeError as e:
+            print(f"error: {e}", file=_sys.stderr)
+            return EXIT_OTHER
         except Exception as e:  # noqa: BLE001 — catch-all
             print(f"error: {e}", file=_sys.stderr)
             return EXIT_OTHER
