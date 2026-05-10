@@ -35,7 +35,37 @@ __all__ = [
     "read_entries",
     "derive_state",
     "ingest",
+    "IngestJSONError",
+    "IngestShapeError",
+    "IngestDuplicateError",
+    "IngestActiveError",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Story 6 — typed ingest errors. Each subclass narrows ValueError so the
+# existing `pytest.raises(ValueError)` callers keep working, while the CLI
+# can map the class to a distinct exit code (see `_cli_main`).
+# ---------------------------------------------------------------------------
+
+class IngestJSONError(ValueError):
+    """Handoff file is not valid JSON (malformed / empty)."""
+
+
+class IngestShapeError(ValueError):
+    """Handoff JSON is well-formed but does not match the required shape
+    (missing/wrong-typed top-level fields, bad/duplicate requirements)."""
+
+
+class IngestDuplicateError(ValueError):
+    """The handoff's iteration_id matches a prior `iteration_open` entry —
+    open OR closed. Distinct from `IngestActiveError`, which fires only
+    while another iteration is currently open."""
+
+
+class IngestActiveError(ValueError):
+    """An iteration is currently open; cannot ingest a new handoff until
+    it is closed."""
 
 
 def _append_entry(entry: dict) -> None:
@@ -286,69 +316,88 @@ def ingest(path) -> dict:
     try:
         handoff = json.loads(raw)
     except json.JSONDecodeError as e:
-        raise ValueError(
+        raise IngestJSONError(
             f"handoff file is not valid JSON: {e.msg}"
         ) from e
 
     # --- Top-level shape ---
     if not isinstance(handoff, dict):
-        raise ValueError(
+        raise IngestShapeError(
             f"handoff top-level must be a JSON object, got "
             f"{handoff.__class__.__name__}"
         )
 
     # iteration_id
     if "iteration_id" not in handoff:
-        raise ValueError("handoff missing required field 'iteration_id'")
+        raise IngestShapeError(
+            "handoff missing required field 'iteration_id'"
+        )
     iter_id = handoff["iteration_id"]
     if not isinstance(iter_id, str) or not iter_id.strip():
-        raise ValueError(
+        raise IngestShapeError(
             "handoff 'iteration_id' must be a non-empty string"
         )
 
     # requirements
     if "requirements" not in handoff:
-        raise ValueError("handoff missing required field 'requirements'")
+        raise IngestShapeError(
+            "handoff missing required field 'requirements'"
+        )
     reqs = handoff["requirements"]
     if not isinstance(reqs, list):
-        raise ValueError(
+        raise IngestShapeError(
             f"handoff 'requirements' must be a list, got "
             f"{reqs.__class__.__name__}"
         )
     if len(reqs) == 0:
-        raise ValueError("handoff 'requirements' must not be empty")
+        raise IngestShapeError(
+            "handoff 'requirements' must not be empty"
+        )
 
     # Per-requirement validation + duplicate-id check
     seen_ids: dict = {}
     for i, req in enumerate(reqs):
         if not isinstance(req, dict):
-            raise ValueError(
+            raise IngestShapeError(
                 f"handoff 'requirements'[{i}] must be a dict, got "
                 f"{req.__class__.__name__}"
             )
         if "requirement_id" not in req:
-            raise ValueError(
+            raise IngestShapeError(
                 f"handoff 'requirements'[{i}] missing required field "
                 f"'requirement_id'"
             )
         rid = req["requirement_id"]
         if not isinstance(rid, str) or not rid.strip():
-            raise ValueError(
+            raise IngestShapeError(
                 f"handoff 'requirements'[{i}] 'requirement_id' must be a "
                 f"non-empty string"
             )
         if rid in seen_ids:
-            raise ValueError(
+            raise IngestShapeError(
                 f"handoff 'requirements' contains duplicate "
                 f"requirement_id {rid!r}"
             )
         seen_ids[rid] = i
 
+    # --- Duplicate iteration_id check (Story 6).
+    # Scan ALL prior `iteration_open` entries — including ones that have
+    # since been closed or force-closed. This is independent of (and runs
+    # before) the single-active check: a duplicate is a duplicate even
+    # if nothing is currently open. Pure read of the log; no write.
+    for prior in read_entries():
+        if (prior.get("type") == "iteration_open"
+                and prior.get("iteration_id") == iter_id):
+            raise IngestDuplicateError(
+                f"cannot ingest: iteration_id {iter_id!r} was already "
+                f"used by a prior iteration_open entry"
+            )
+
     # --- Single-active-iteration enforcement (via derive_state) ---
     state = derive_state()
     if state["active_iteration"] is not None:
         open_id = state["active_iteration"]["iteration_id"]
-        raise ValueError(
+        raise IngestActiveError(
             f"cannot ingest: iteration {open_id!r} is already open"
         )
 
@@ -362,20 +411,64 @@ def ingest(path) -> dict:
 # CLI surface — `python -m sm <command> <args...>`
 # ---------------------------------------------------------------------------
 
+# Story 6 — documented CLI exit codes. Exposed so callers and docs can
+# reference them by name. Every error class maps to exactly one code,
+# distinct from every other class and from success (0).
+EXIT_OK = 0
+EXIT_OTHER = 1
+EXIT_PATH = 2
+EXIT_JSON = 3
+EXIT_SHAPE = 4
+EXIT_DUP_ID = 5
+EXIT_SINGLE_ACTIVE = 6
+
+
+_HELP_TEXT = """\
+usage: python -m sm <command> [args...]
+
+Commands:
+  ingest <path>    Ingest a PO Tool iteration_open handoff JSON file.
+
+Exit codes (return codes) for `ingest`:
+  0  success
+  1  unexpected / other error
+  2  path error           (file not found, path is a directory)
+  3  JSON parse error     (malformed or empty handoff JSON)
+  4  shape error          (handoff missing/wrong-typed fields, bad reqs)
+  5  duplicate iteration_id (id was used by a prior iteration_open,
+                             open or closed)
+  6  single-active-iteration violation (another iteration is open)
+"""
+
+
 def _cli_main(argv: list) -> int:
-    """Dispatch CLI subcommands. Returns the exit code."""
+    """Dispatch CLI subcommands. Returns the exit code.
+
+    Story 6 — distinct exit codes per error class:
+        0 success, 1 other, 2 path, 3 json, 4 shape, 5 dup-id,
+        6 single-active.
+    """
     import os
     import sys as _sys
 
     if len(argv) < 1:
-        print("usage: python -m sm <command> [args...]", file=_sys.stderr)
-        return 1
+        print(_HELP_TEXT, file=_sys.stderr)
+        return EXIT_OTHER
 
     cmd = argv[0]
+
+    if cmd in ("--help", "-h", "help"):
+        print(_HELP_TEXT)
+        return EXIT_OK
+
     if cmd == "ingest":
+        if len(argv) >= 2 and argv[1] in ("--help", "-h"):
+            print(_HELP_TEXT)
+            return EXIT_OK
         if len(argv) != 2:
             print("usage: python -m sm ingest <path>", file=_sys.stderr)
-            return 1
+            print(_HELP_TEXT, file=_sys.stderr)
+            return EXIT_OTHER
 
         # Honor SM_LOG_PATH env var if set, so subprocess CLI tests stay
         # hermetic and the package's real log isn't touched.
@@ -386,15 +479,31 @@ def _cli_main(argv: list) -> int:
 
         try:
             entry = ingest(argv[1])
-        except Exception as e:  # noqa: BLE001 — surface any error to stderr
+        except IngestDuplicateError as e:
             print(f"error: {e}", file=_sys.stderr)
-            return 1
+            return EXIT_DUP_ID
+        except IngestActiveError as e:
+            print(f"error: {e}", file=_sys.stderr)
+            return EXIT_SINGLE_ACTIVE
+        except IngestShapeError as e:
+            print(f"error: {e}", file=_sys.stderr)
+            return EXIT_SHAPE
+        except IngestJSONError as e:
+            print(f"error: {e}", file=_sys.stderr)
+            return EXIT_JSON
+        except (FileNotFoundError, IsADirectoryError) as e:
+            print(f"error: {e}", file=_sys.stderr)
+            return EXIT_PATH
+        except Exception as e:  # noqa: BLE001 — catch-all
+            print(f"error: {e}", file=_sys.stderr)
+            return EXIT_OTHER
 
         print(entry["iteration_id"])
-        return 0
+        return EXIT_OK
 
     print(f"unknown command: {cmd!r}", file=_sys.stderr)
-    return 1
+    print(_HELP_TEXT, file=_sys.stderr)
+    return EXIT_OTHER
 
 
 if __name__ == "__main__":

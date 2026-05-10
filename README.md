@@ -78,6 +78,25 @@ cd sm-tool
 python -m pytest tests/
 ```
 
+## CLI exit codes
+
+`python -m sm ingest <path>` surfaces a documented, non-zero exit code
+per failure class. Each error class has its own return code, distinct
+from every other class and from success.
+
+| Exit code | Meaning                                                    |
+|-----------|------------------------------------------------------------|
+| 0         | success                                                    |
+| 1         | unexpected / other error (catch-all)                       |
+| 2         | path error (file not found, path is a directory)           |
+| 3         | JSON parse error (malformed or empty handoff JSON)         |
+| 4         | shape error (missing/wrong-typed fields, bad requirements) |
+| 5         | duplicate iteration_id (id was used by a prior open)       |
+| 6         | single-active-iteration violation (another iteration open) |
+
+The same codes are also surfaced by `python -m sm --help` and
+`python -m sm ingest --help`.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
