@@ -10,10 +10,13 @@ from __future__ import annotations
 
 import copy as _copy
 import datetime as _dt
+import hashlib as _hashlib
 import json
 import uuid
 from pathlib import Path
 from typing import Iterator
+
+_CANONICAL_ROLES = ("sm_agent", "test_writer", "coder", "reviewer")
 
 LOG_PATH: Path = Path(__file__).resolve().parent / "log.jsonl"
 
@@ -39,6 +42,8 @@ __all__ = [
     "IngestShapeError",
     "IngestDuplicateError",
     "IngestActiveError",
+    "resolve_role_spec",
+    "RoleSpecNotFoundError",
 ]
 
 
@@ -66,6 +71,68 @@ class IngestDuplicateError(ValueError):
 class IngestActiveError(ValueError):
     """An iteration is currently open; cannot ingest a new handoff until
     it is closed."""
+
+
+class RoleSpecNotFoundError(FileNotFoundError):
+    """Raised when a canonical role-spec file does not exist on disk at the
+    resolved path. Subclasses FileNotFoundError so existing
+    `except FileNotFoundError` callers keep working."""
+
+
+def resolve_role_spec(role: str) -> Path:
+    """Resolve the absolute path to a canonical role-spec markdown file.
+
+    Returns an absolute pathlib.Path to `<package_dir>/roles/<role>.md`,
+    where `<package_dir>` is `LOG_PATH.parent` (the same anchor used for
+    log lookup, so monkeypatching LOG_PATH redirects role-spec lookup
+    consistently with the rest of the suite).
+
+    Validation:
+      - `role` must be a `str`. Non-string raises TypeError naming the
+        class of the bad value.
+      - `role` must be non-empty and not whitespace-only. Empty/blank
+        raises ValueError.
+      - `role` must be one of the four canonical names. Anything else
+        raises ValueError naming the offending string.
+
+    If the resolved path does not exist on disk, raises
+    `RoleSpecNotFoundError` (a FileNotFoundError subclass) naming the role.
+    """
+    if not isinstance(role, str):
+        raise TypeError(
+            f"role must be a string, got {role.__class__.__name__}"
+        )
+    if not role or not role.strip():
+        raise ValueError("role must be a non-empty, non-whitespace string")
+    if role not in _CANONICAL_ROLES:
+        raise ValueError(
+            f"unknown role {role!r}; valid roles are {_CANONICAL_ROLES!r}"
+        )
+
+    # Anchor at LOG_PATH.parent so monkeypatching LOG_PATH redirects
+    # role-spec lookup the same way it redirects log lookup. Resolve to
+    # absolute so the returned Path is always absolute, even when LOG_PATH
+    # is set to a relative path.
+    package_dir = Path(LOG_PATH).resolve().parent
+    spec_path = (package_dir / "roles" / f"{role}.md").resolve()
+
+    if not spec_path.is_file():
+        raise RoleSpecNotFoundError(
+            f"role-spec file for role {role!r} not found at {spec_path!s}"
+        )
+
+    return spec_path
+
+
+def _role_spec_hash(role: str) -> str:
+    """Return the SHA-256 hex digest of the role-spec file's bytes.
+
+    Validation flows through `resolve_role_spec` — unknown / empty /
+    non-string roles raise the same errors, and a missing file raises
+    `RoleSpecNotFoundError`. Same role + same bytes -> same digest.
+    """
+    spec_path = resolve_role_spec(role)
+    return _hashlib.sha256(spec_path.read_bytes()).hexdigest()
 
 
 def _append_entry(entry: dict) -> None:
