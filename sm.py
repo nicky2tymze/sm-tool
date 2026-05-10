@@ -48,6 +48,8 @@ __all__ = [
     "DecomposeOutputParseError",
     "DecomposeOutputShapeError",
     "DecomposeUnknownRequirementError",
+    "sprint_cut",
+    "SprintCutError",
 ]
 
 
@@ -113,6 +115,17 @@ class DecomposeUnknownRequirementError(ValueError):
     `DecomposeOutputShapeError` — both subclass ValueError so existing
     `except ValueError` callers keep working, but callers can branch on
     the exact class for cross-reference vs shape failures."""
+
+
+# ---------------------------------------------------------------------------
+# Story 11 — typed sprint_cut error. Subclasses ValueError so existing
+# `except ValueError` callers keep working, while the CLI maps the class to
+# a distinct exit code (see `_cli_main`).
+# ---------------------------------------------------------------------------
+
+class SprintCutError(ValueError):
+    """Raised when sprint_cut command fails: no active iteration, no story
+    backlog yet, or N out of range (zero, negative, or > len(backlog))."""
 
 
 def resolve_role_spec(role: str) -> Path:
@@ -703,6 +716,74 @@ def decompose(spawn_agent: Optional[Callable] = None) -> dict:
     return entry
 
 
+def sprint_cut(n: int) -> dict:
+    """Cut the story backlog at position N.
+
+    Story 11 contract:
+
+      - Reads the active iteration's story backlog via `derive_state()`.
+      - Validates type-first: bool is rejected (not a real int), and any
+        other non-int type raises `TypeError`.
+      - Validates state: no active iteration → `SprintCutError`. No story
+        backlog yet → `SprintCutError`. Both with no log write.
+      - Validates range: 1 <= N <= len(backlog). Out-of-range →
+        `SprintCutError`. No log write.
+      - On success: writes a single `sprint_cut` entry whose content
+        carries `cut_position` (int N), `in_sprint_story_ids` (story_ids
+        1..N in sequence order), and `deferred_story_ids` (story_ids
+        N+1..end in sequence order). Returns the appended entry dict.
+      - Re-cut is allowed regardless of story states — the lock-when-
+        not-planned rule is Story 12's responsibility, not Story 11's.
+
+    Failure invariant: log.jsonl is byte-for-byte unchanged on any
+    validation/argument failure (TypeError or SprintCutError).
+    """
+    # Type validation FIRST — bool is int subclass, reject explicitly.
+    if isinstance(n, bool) or not isinstance(n, int):
+        raise TypeError(
+            f"n must be int, got {n.__class__.__name__}"
+        )
+
+    state = derive_state()
+    if state["active_iteration"] is None:
+        raise SprintCutError(
+            "no active iteration; ingest a handoff first"
+        )
+
+    backlog = state["story_backlog"]
+    if not backlog:
+        raise SprintCutError(
+            "no story backlog yet; run decompose first"
+        )
+
+    L = len(backlog)
+    if n < 1:
+        raise SprintCutError(
+            f"position must be >= 1, got {n}"
+        )
+    if n > L:
+        raise SprintCutError(
+            f"position {n} exceeds backlog length {L}"
+        )
+
+    # Build the cut: stories 1..N in sprint, N+1..L deferred. derive_state
+    # already returns the backlog sorted by sequence, so slicing preserves
+    # sequence order.
+    in_sprint_ids = [s["story_id"] for s in backlog[:n]]
+    deferred_ids = [s["story_id"] for s in backlog[n:]]
+
+    entry = build_entry(
+        "sprint_cut",
+        {
+            "cut_position": n,
+            "in_sprint_story_ids": in_sprint_ids,
+            "deferred_story_ids": deferred_ids,
+        },
+    )
+    _append_entry(entry)
+    return entry
+
+
 # ---------------------------------------------------------------------------
 # CLI surface — `python -m sm <command> <args...>`
 # ---------------------------------------------------------------------------
@@ -718,6 +799,7 @@ EXIT_SHAPE = 4
 EXIT_DUP_ID = 5
 EXIT_SINGLE_ACTIVE = 6
 EXIT_UNKNOWN_REQ = 7
+EXIT_SPRINT_CUT = 8
 
 
 _HELP_TEXT = """\
@@ -781,6 +863,45 @@ def _cli_main(argv: list) -> int:
             print(f"error: {e}", file=_sys.stderr)
             return EXIT_UNKNOWN_REQ
         except ValueError as e:
+            print(f"error: {e}", file=_sys.stderr)
+            return EXIT_OTHER
+        except Exception as e:  # noqa: BLE001 — catch-all
+            print(f"error: {e}", file=_sys.stderr)
+            return EXIT_OTHER
+
+        print(entry["id"])
+        return EXIT_OK
+
+    if cmd == "sprint-cut":
+        if len(argv) >= 2 and argv[1] in ("--help", "-h"):
+            print(_HELP_TEXT)
+            return EXIT_OK
+        if len(argv) != 2:
+            print(
+                "usage: python -m sm sprint-cut <N>", file=_sys.stderr
+            )
+            print(_HELP_TEXT, file=_sys.stderr)
+            return EXIT_OTHER
+
+        # Honor SM_LOG_PATH for hermetic subprocess testing.
+        env_log = os.environ.get("SM_LOG_PATH")
+        if env_log:
+            LOG_PATH = Path(env_log)
+
+        # Parse N — invalid integer string -> EXIT_SPRINT_CUT (recognized
+        # command, validation failure path).
+        try:
+            n = int(argv[1])
+        except (ValueError, TypeError) as e:
+            print(f"error: invalid N {argv[1]!r}: {e}", file=_sys.stderr)
+            return EXIT_SPRINT_CUT
+
+        try:
+            entry = sprint_cut(n)
+        except SprintCutError as e:
+            print(f"error: {e}", file=_sys.stderr)
+            return EXIT_SPRINT_CUT
+        except TypeError as e:
             print(f"error: {e}", file=_sys.stderr)
             return EXIT_OTHER
         except Exception as e:  # noqa: BLE001 — catch-all
