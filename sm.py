@@ -8,14 +8,19 @@ Stdlib only; Python 3.10+.
 
 from __future__ import annotations
 
+import datetime as _dt
 import json
+import uuid
 from pathlib import Path
 from typing import Iterator
 
 LOG_PATH: Path = Path(__file__).resolve().parent / "log.jsonl"
 
+_RESERVED_KEYS = ("id", "type", "timestamp")
+
 __all__ = [
     "LOG_PATH",
+    "build_entry",
     "read_entries",
 ]
 
@@ -85,3 +90,63 @@ def read_entries() -> Iterator[dict]:
                 )
 
             yield obj
+
+
+def build_entry(type: str, content: dict) -> dict:
+    """Build a canonical log entry dict from a `type` and a `content` payload.
+
+    Returns a new dict whose first three keys are auto-stamped — `id` (a fresh
+    32-char lowercase-hex uuid4), `type` (the param verbatim), `timestamp`
+    (ISO 8601 with local timezone offset, via
+    `datetime.now().astimezone().isoformat()`) — followed by the content
+    fields in their original insertion order, merged at the top level.
+
+    Validation:
+      - `type` must be a non-empty, non-whitespace-only `str`. Non-string
+        raises `TypeError`; empty/whitespace-only raises `ValueError`.
+      - `content` must be a `dict` (or dict subclass). Other types raise
+        `TypeError`. Empty dict is accepted.
+      - `content` must not contain top-level keys `'id'`, `'type'`, or
+        `'timestamp'` (case-sensitive — `'ID'`, `'Type'` are allowed; nested
+        keys are not flagged). Violation raises `ValueError` naming the
+        offending key.
+
+    The returned dict is a fresh object — mutating it does not affect the
+    input, and mutating the input after the call does not affect the result.
+    """
+    # NOTE: the `type` parameter shadows the builtin inside this function.
+    # Use `.__class__.__name__` to format type names in error messages —
+    # never call `type(x)`.
+
+    # --- Validate `type` parameter ---
+    # Reject bool explicitly: bool is not a str subclass, so isinstance check
+    # below already covers it. Strict str-only.
+    if not isinstance(type, str):
+        raise TypeError(
+            f"type must be a string, got {type.__class__.__name__}"
+        )
+    if not type or not type.strip():
+        raise ValueError("type must be a non-empty, non-whitespace string")
+
+    # --- Validate `content` parameter ---
+    if not isinstance(content, dict):
+        raise TypeError(
+            f"content must be a dict, got {content.__class__.__name__}"
+        )
+
+    # --- Reserved-key check (case-sensitive, top-level only) ---
+    for k in _RESERVED_KEYS:
+        if k in content:
+            raise ValueError(
+                f"content must not contain reserved key {k!r}"
+            )
+
+    # --- Build the result dict (auto-stamped fields first, then content) ---
+    result: dict = {
+        "id": uuid.uuid4().hex,
+        "type": type,
+        "timestamp": _dt.datetime.now().astimezone().isoformat(),
+    }
+    for k, v in content.items():
+        result[k] = v
+    return result
