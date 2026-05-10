@@ -4,8 +4,18 @@ A scrum-master pipeline tool: reads a product-owner iteration handoff,
 drives requirement-to-story decomposition, manages the per-story
 test-writer → coder → reviewer pipeline. Single JSONL log, append-only.
 
-**Status: in active build.** This repo is filling in live during
-Iteration 1 of `sm-tool` v0.3.
+**Status: Sprint 1 shipped (2026-05-10) — Sprint 2 deferred.** Iteration
+1 is half-shipped: the foundation, ingestion, decomposition, and
+sprint-cut commands are in production. Lifecycle / status / close
+land in Sprint 2.
+
+- 12 of 12 Sprint 1 stories shipped
+- 942 tests across 13 files, 100% green
+- 4 of 4 L stories first-pass implementation-clean
+- 1 push-back fire (resolved); 11 stories first-pass with zero push-back
+
+See [`iter1/Sprint_1_Retro.md`](iter1/Sprint_1_Retro.md) for full
+sprint stats and retro.
 
 Part of a small development suite shaped on the same patterns:
 
