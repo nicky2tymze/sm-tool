@@ -59,6 +59,9 @@ __all__ = [
     "status",
     "aggregate_requirements",
     "AggregateError",
+    "close_iteration",
+    "IterationCloseError",
+    "EXIT_CLOSE",
 ]
 
 
@@ -201,6 +204,21 @@ class AggregateError(ValueError):
     iteration, or one-or-more orphan requirement_ids (requirements declared
     on the iteration with no story rolling up to them). Subclasses
     ValueError so existing `except ValueError` callers keep working."""
+
+
+# ---------------------------------------------------------------------------
+# Story 18 — typed iteration-close error. Subclasses ValueError so existing
+# `except ValueError` callers keep working, while the CLI maps the class to
+# a distinct exit code (EXIT_CLOSE = 11). Raised by close_iteration on every
+# validation failure (no active iteration, no backlog, no sprint_cut,
+# non-terminal in-sprint stories).
+# ---------------------------------------------------------------------------
+
+class IterationCloseError(ValueError):
+    """Raised when close_iteration cannot close the active iteration: no
+    active iteration, no story backlog, no sprint_cut, or one-or-more
+    in-sprint stories still in a non-terminal state. Subclasses ValueError
+    so existing `except ValueError` callers keep working."""
 
 
 # Story 13 graph — exposes only the operator-driven transitions. The
@@ -1327,6 +1345,211 @@ def aggregate_requirements(state: dict) -> dict:
     return result
 
 
+def close_iteration(
+    closed_by: str = "operator",
+    reason: Optional[str] = None,
+) -> dict:
+    """Close the active iteration: produce the close handoff JSON sidecar
+    file AND append a single `iteration_close` log entry.
+
+    Story 18 contract:
+
+      - Reads state via `derive_state()`. Validation cascade — each failure
+        raises `IterationCloseError`, no log write, no handoff file:
+            * no active iteration
+            * no story_backlog (decompose not yet run)
+            * no sprint_cut yet
+            * one-or-more in-sprint stories in a non-terminal state. The
+              error message names every offender (story_id + current state).
+
+      - On success: calls `aggregate_requirements(state)`, writes a single
+        `close_handoff_<iteration_id>.json` file at `LOG_PATH.parent`, then
+        appends a single `iteration_close` log entry via `build_entry` +
+        `_append_entry`. Returns the appended entry dict.
+
+      - Handoff file contents:
+            {
+              "iteration_id":          "<id>",
+              "iteration_goal":        "<copied from iteration_open>",
+              "per_requirement_status": {"req-1": "accepted", ...},
+              "stories": [
+                {"story_id", "sequence", "title",
+                 "requirement_ids", "outcome"},
+                ...
+              ],
+              "closed_at": "<ISO 8601>",
+            }
+
+      - iteration_close entry shape:
+            {
+              "id", "type": "iteration_close", "timestamp" (auto-stamped),
+              "iteration_id":           "<id>",
+              "handoff_file_path":      "<absolute string>",
+              "per_requirement_status": {"req-1": "accepted", ...},
+              "closed_by":              "operator" (default),
+              "reason":                 None (default),
+              "accepted_count":         <int>,
+              "rejected_count":         <int>,
+              "force_closed_count":     <int>,
+            }
+
+      - Failure invariant: log.jsonl is byte-for-byte unchanged AND no
+        handoff JSON file appears on every failure path.
+
+      - Story 19 reuse: `closed_by` and `reason` are kwargs with defaults
+        ("operator", None) so Story 19's force-close can call
+        `close_iteration(closed_by="force-close", reason="<text>")` without
+        breaking change.
+    """
+    # --- Replay state (pure read; no log write). ---
+    state = derive_state()
+
+    # --- Validation cascade ---
+    if state["active_iteration"] is None:
+        raise IterationCloseError(
+            "no active iteration; nothing to close"
+        )
+
+    backlog = state["story_backlog"]
+    if not backlog:
+        raise IterationCloseError(
+            "no story backlog yet; run decompose before closing the "
+            "iteration"
+        )
+
+    if state["sprint_cut"] is None:
+        raise IterationCloseError(
+            "no sprint_cut yet; cut the sprint before closing the "
+            "iteration"
+        )
+
+    # --- Find the LATEST sprint_cut entry's in_sprint_story_ids, plus the
+    # iteration_goal from the matching iteration_open entry. derive_state
+    # doesn't carry either, so do one targeted log scan.
+    iteration_id = state["active_iteration"].get("iteration_id")
+    in_sprint_ids: list = []
+    iteration_goal: Optional[str] = None
+    for entry in read_entries():
+        etype = entry.get("type")
+        if etype == "iteration_open" and entry.get("iteration_id") == iteration_id:
+            iteration_goal = entry.get("iteration_goal")
+        elif etype == "sprint_cut":
+            in_sprint_ids = entry.get("in_sprint_story_ids", []) or []
+
+    # --- Gate: every in-sprint story must be in a terminal state. ---
+    story_states = state["story_states"]
+    non_terminal = []
+    for sid in in_sprint_ids:
+        cur = story_states.get(sid, "planned")
+        if cur not in _TERMINAL_STATES:
+            non_terminal.append((sid, cur))
+
+    if non_terminal:
+        details = ", ".join(
+            f"{sid!r} (state={state_name!r})"
+            for sid, state_name in non_terminal
+        )
+        raise IterationCloseError(
+            f"cannot close iteration {iteration_id!r}: the following "
+            f"in-sprint stories are still non-terminal: {details}; every "
+            f"in-sprint story must be accepted, rejected, or force-closed "
+            f"before close"
+        )
+
+    # --- Aggregate per-requirement status (Story 17). Pure function over
+    # the state dict — no log read, no log write. May raise AggregateError
+    # if the iteration has orphan requirements; surface those as a
+    # close-domain failure so the CLI maps to EXIT_CLOSE.
+    try:
+        per_requirement_status = aggregate_requirements(state)
+    except AggregateError as e:
+        raise IterationCloseError(
+            f"cannot close iteration {iteration_id!r}: aggregation failed "
+            f"({e})"
+        ) from e
+
+    # --- Compute counts over the in-sprint stories. ---
+    accepted_count = 0
+    rejected_count = 0
+    force_closed_count = 0
+    for sid in in_sprint_ids:
+        cur = story_states.get(sid, "planned")
+        if cur == "accepted":
+            accepted_count += 1
+        elif cur == "rejected":
+            rejected_count += 1
+        elif cur == "force_closed":
+            force_closed_count += 1
+
+    # --- Build the handoff JSON payload. Stories list mirrors the
+    # in-sprint backlog (stories not in the sprint are excluded — the
+    # close handoff documents what was attempted in this sprint).
+    backlog_by_id = {s["story_id"]: s for s in backlog}
+    handoff_stories: list = []
+    for sid in in_sprint_ids:
+        s = backlog_by_id.get(sid)
+        if s is None:
+            # Should not happen: in_sprint_ids comes from a sprint_cut entry
+            # whose ids were minted from the same backlog. Defense in depth.
+            continue
+        outcome = story_states.get(sid, "planned")
+        handoff_stories.append({
+            "story_id": s["story_id"],
+            "sequence": s["sequence"],
+            "title": s.get("title", ""),
+            "requirement_ids": list(s.get("requirement_ids", []) or []),
+            "outcome": outcome,
+        })
+
+    closed_at = _dt.datetime.now().astimezone().isoformat()
+    handoff_payload = {
+        "iteration_id": iteration_id,
+        "iteration_goal": iteration_goal,
+        "per_requirement_status": dict(per_requirement_status),
+        "stories": handoff_stories,
+        "closed_at": closed_at,
+    }
+
+    # --- Determine the handoff file path. Anchor at LOG_PATH.parent so
+    # tests' monkeypatching of sm.LOG_PATH redirects sidecar lookup the
+    # same way it redirects log lookup. Make the path absolute.
+    handoff_path = Path(LOG_PATH).resolve().parent / (
+        f"close_handoff_{iteration_id}.json"
+    )
+
+    # --- Serialize + write the handoff JSON file. Use Path.write_text so
+    # the codebase's "no write-mode open()" invariant stays clean (the only
+    # write-mode open in sm.py is the _append_entry append). Path.write_text
+    # delegates to the lower-level stdlib write API, not Python's open().
+    # LOG_PATH.parent must already exist for any prior log write to have
+    # succeeded; if not, write_text raises FileNotFoundError and the log
+    # remains untouched (no _append_entry call has happened yet).
+    handoff_text = json.dumps(
+        handoff_payload, ensure_ascii=False, indent=2
+    ) + "\n"
+    handoff_path.write_text(handoff_text, encoding="utf-8")
+
+    # --- Build + append the iteration_close log entry. The handoff file
+    # has already been written; if _append_entry fails, the handoff file
+    # is orphaned — but on the happy path tested here, the log write is
+    # the last step.
+    entry = build_entry(
+        "iteration_close",
+        {
+            "iteration_id": iteration_id,
+            "handoff_file_path": str(handoff_path),
+            "per_requirement_status": dict(per_requirement_status),
+            "closed_by": closed_by,
+            "reason": reason,
+            "accepted_count": accepted_count,
+            "rejected_count": rejected_count,
+            "force_closed_count": force_closed_count,
+        },
+    )
+    _append_entry(entry)
+    return entry
+
+
 # ---------------------------------------------------------------------------
 # CLI surface — `python -m sm <command> <args...>`
 # ---------------------------------------------------------------------------
@@ -1344,6 +1567,8 @@ EXIT_SINGLE_ACTIVE = 6
 EXIT_UNKNOWN_REQ = 7
 EXIT_SPRINT_CUT = 8
 EXIT_TRANSITION = 9
+# Story 18 — distinct exit code for iteration-close failures.
+EXIT_CLOSE = 11
 
 
 _HELP_TEXT = """\
@@ -1654,6 +1879,40 @@ def _cli_main(argv: list) -> int:
         # `status()` returns a string. Print verbatim — read-only query
         # never fails on "nothing to report".
         print(out, end="" if out.endswith("\n") else "\n")
+        return EXIT_OK
+
+    # Story 18 — close iteration subcommand. No args; produces the close
+    # handoff JSON sidecar + appends a single iteration_close log entry.
+    # Exit codes:
+    #   EXIT_OK          on success
+    #   EXIT_CLOSE       on IterationCloseError (validation failure)
+    #   EXIT_OTHER       on bad args (extra positional) or unexpected errors
+    if cmd == "close":
+        if len(argv) >= 2 and argv[1] in ("--help", "-h"):
+            print(_HELP_TEXT)
+            return EXIT_OK
+        if len(argv) != 1:
+            print(
+                "usage: python -m sm close (no arguments)",
+                file=_sys.stderr,
+            )
+            return EXIT_OTHER
+
+        # Honor SM_LOG_PATH for hermetic subprocess testing.
+        env_log = os.environ.get("SM_LOG_PATH")
+        if env_log:
+            LOG_PATH = Path(env_log)
+
+        try:
+            entry = close_iteration()
+        except IterationCloseError as e:
+            print(f"error: {e}", file=_sys.stderr)
+            return EXIT_CLOSE
+        except Exception as e:  # noqa: BLE001 — catch-all
+            print(f"error: {e}", file=_sys.stderr)
+            return EXIT_OTHER
+
+        print(entry["id"])
         return EXIT_OK
 
     print(f"unknown command: {cmd!r}", file=_sys.stderr)
