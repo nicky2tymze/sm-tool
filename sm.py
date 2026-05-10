@@ -56,6 +56,7 @@ __all__ = [
     "record_review",
     "ReviewError",
     "AcceptGateError",
+    "status",
 ]
 
 
@@ -1126,6 +1127,81 @@ def record_review(story_id: str, approved: bool, test_result: str) -> dict:
     return entry
 
 
+def status() -> str:
+    """Render a human-readable snapshot of the active iteration's state.
+
+    Story 16 contract:
+
+      - Pure read: calls `derive_state()` only. Never calls `_append_entry`,
+        never touches `log.jsonl`, never creates sidecar files. Two
+        consecutive calls return equal strings on a frozen log.
+
+      - Returns a non-empty string. Implementor's choice between print and
+        return — this implementation returns the string (the CLI handler
+        prints it).
+
+      - No active iteration: returned string contains the substring
+        ``"no active iteration"``. Covers empty log, post-close, and
+        missing-LOG_PATH-on-disk cases (derive_state already handles all
+        three uniformly).
+
+      - Active iteration: header line names the iteration_id. Each backlog
+        story (if any) gets one line carrying:
+            * sequence
+            * story_id
+            * membership label — ``in-sprint`` or ``deferred`` (depending
+              on whether the latest sprint_cut placed it in or after the
+              cut). Pre-cut, all stories are labelled ``deferred`` —
+              tests don't pin a specific choice here.
+            * lifecycle state from ``state["story_states"]``
+        Stories render in sequence-ascending order (derive_state already
+        sorts the backlog).
+
+    Returns:
+        str: rendered snapshot.
+    """
+    state = derive_state()
+
+    if state["active_iteration"] is None:
+        return "no active iteration"
+
+    iteration_id = state["active_iteration"].get("iteration_id")
+    backlog = state["story_backlog"]
+    story_states = state["story_states"]
+
+    # Find the LATEST sprint_cut entry's in_sprint_story_ids so per-story
+    # membership labels can be derived. derive_state stores only the cut
+    # position int; we need the actual id set for label rendering.
+    in_sprint_ids: set = set()
+    cut_seen = False
+    for entry in read_entries():
+        if entry.get("type") == "sprint_cut":
+            cut_seen = True
+            in_sprint_ids = set(entry.get("in_sprint_story_ids", []) or [])
+
+    lines: list = [f"iteration: {iteration_id}"]
+
+    if not backlog:
+        lines.append("no story backlog")
+    else:
+        for s in backlog:
+            sid = s.get("story_id")
+            seq = s.get("sequence")
+            lifecycle = story_states.get(sid, "planned")
+            if cut_seen:
+                membership = "in-sprint" if sid in in_sprint_ids else "deferred"
+            else:
+                # Pre-cut: tests don't pin a specific label. Mark all
+                # stories deferred by default — none are formally in-sprint
+                # until sprint_cut runs.
+                membership = "deferred"
+            lines.append(
+                f"  [{seq}] {sid} {membership} {lifecycle}"
+            )
+
+    return "\n".join(lines) + "\n"
+
+
 # ---------------------------------------------------------------------------
 # CLI surface — `python -m sm <command> <args...>`
 # ---------------------------------------------------------------------------
@@ -1436,6 +1512,23 @@ def _cli_main(argv: list) -> int:
             return EXIT_OTHER
 
         print(entry["id"])
+        return EXIT_OK
+
+    # Story 16 — status read-only query subcommand. No args, always exits 0.
+    if cmd == "status":
+        if len(argv) >= 2 and argv[1] in ("--help", "-h"):
+            print(_HELP_TEXT)
+            return EXIT_OK
+
+        # Honor SM_LOG_PATH for hermetic subprocess testing.
+        env_log = os.environ.get("SM_LOG_PATH")
+        if env_log:
+            LOG_PATH = Path(env_log)
+
+        out = status()
+        # `status()` returns a string. Print verbatim — read-only query
+        # never fails on "nothing to report".
+        print(out, end="" if out.endswith("\n") else "\n")
         return EXIT_OK
 
     print(f"unknown command: {cmd!r}", file=_sys.stderr)
