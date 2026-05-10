@@ -53,6 +53,9 @@ __all__ = [
     "SprintCutLockedError",
     "transition_story",
     "StoryTransitionError",
+    "record_review",
+    "ReviewError",
+    "AcceptGateError",
 ]
 
 
@@ -157,6 +160,30 @@ class StoryTransitionError(ValueError):
     iteration, no active sprint, story not in sprint, terminal-already,
     invalid state name, or illegal lifecycle transition. Subclasses
     ValueError so existing `except ValueError` callers keep working."""
+
+
+# ---------------------------------------------------------------------------
+# Story 15 — reviewer-approval entry + accept gate. ReviewError covers
+# record_review's semantic failures (whitespace test_result, etc.). It
+# subclasses ValueError so existing `except ValueError` callers keep working.
+# AcceptGateError narrows StoryTransitionError so existing transition-error
+# catches keep matching it, while allowing branch-on-class for the specific
+# "accept fired without a valid prior reviewer_approval" failure mode.
+# ---------------------------------------------------------------------------
+
+class ReviewError(ValueError):
+    """Raised when record_review rejects its arguments on semantic grounds
+    (empty / whitespace-only test_result, etc.). Type errors stay TypeError;
+    only value-shaped failures route here."""
+
+
+class AcceptGateError(StoryTransitionError):
+    """Raised when transition_story(... 'accepted') fires without a valid
+    prior reviewer_approval entry for the same story_id. 'Valid' means the
+    LATEST reviewer_approval for that story_id has approved=True AND a
+    test_result that is non-empty after strip. Subclasses
+    StoryTransitionError so the CLI's existing handler maps it to
+    EXIT_TRANSITION (9) automatically."""
 
 
 # Story 13 graph — exposes only the operator-driven transitions. The
@@ -983,6 +1010,39 @@ def transition_story(
             f"{current_state!r} are {sorted(allowed)!r}"
         )
 
+    # --- Story 15 — accept gate. Only the `accepted` target is gated; the
+    # other transitions (in_progress, in_review, rejected) bypass entirely.
+    # Rule: there must be at least one prior `reviewer_approval` log entry
+    # for this story_id, and the LATEST such entry (last write wins on
+    # replay) must have approved=True AND a test_result that is a string,
+    # non-empty after strip. Synthetic entries with empty/whitespace
+    # test_result do NOT satisfy the gate (defense in depth — the writer
+    # rule and the reader rule must agree).
+    if to_state == "accepted":
+        latest_approval = None
+        for entry in read_entries():
+            if (entry.get("type") == "reviewer_approval"
+                    and entry.get("story_id") == story_id):
+                latest_approval = entry
+
+        def _approval_satisfies_gate(approval: Optional[dict]) -> bool:
+            if approval is None:
+                return False
+            if approval.get("approved") is not True:
+                return False
+            tr = approval.get("test_result")
+            if not isinstance(tr, str) or not tr.strip():
+                return False
+            return True
+
+        if not _approval_satisfies_gate(latest_approval):
+            raise AcceptGateError(
+                f"cannot accept story {story_id!r}: missing a valid "
+                f"reviewer_approval entry (need approved=True with a "
+                f"non-empty test_result); record one via record_review "
+                f"before accepting"
+            )
+
     # --- All validation passed; build + append a single entry ---
     entry = build_entry(
         "story_state_change",
@@ -991,6 +1051,75 @@ def transition_story(
             "from_state": current_state,
             "to_state": to_state,
             "notes": notes,
+        },
+    )
+    _append_entry(entry)
+    return entry
+
+
+def record_review(story_id: str, approved: bool, test_result: str) -> dict:
+    """Record a reviewer's approval (or rejection) for an in-sprint story.
+
+    Story 15 contract:
+
+      - Validates type-first: `story_id` must be `str`; `approved` must be a
+        strict `bool` (NOT an int — `isinstance(x, bool)` is checked
+        explicitly so `1` / `0` are rejected); `test_result` must be `str`.
+        Any type mismatch raises `TypeError`. No log write.
+
+      - Validates value: `test_result` must be non-empty after `.strip()`.
+        Empty / whitespace-only raises `ReviewError`. No log write.
+
+      - On success: appends a single `reviewer_approval` log entry via
+        `build_entry` + `_append_entry`. Entry shape:
+            {
+              "id", "type": "reviewer_approval", "timestamp" (auto-stamped),
+              "story_id":    "<hex>",
+              "approved":    True | False,
+              "test_result": "<verbatim string from caller>",
+            }
+        Returns the appended entry dict.
+
+      - Failure invariant: log.jsonl is byte-for-byte unchanged on any
+        validation failure (TypeError or ReviewError).
+
+      - Note: this writer enforces the non-whitespace rule. The accept gate
+        in `transition_story` enforces the same rule on the read side as
+        defense in depth — synthetic entries planted directly into the log
+        with whitespace-only test_result do NOT satisfy the gate.
+    """
+    # --- Type validation FIRST (before any log read or write) ---
+    if not isinstance(story_id, str):
+        raise TypeError(
+            f"story_id must be a string, got "
+            f"{story_id.__class__.__name__}"
+        )
+    # Strict bool check: bool is an int subclass, so `isinstance(x, int)`
+    # would accept True/False. Here we want the OPPOSITE — only True/False,
+    # never 1/0/"true"/None. Test pinned this explicitly.
+    if not isinstance(approved, bool):
+        raise TypeError(
+            f"approved must be a bool, got {approved.__class__.__name__}"
+        )
+    if not isinstance(test_result, str):
+        raise TypeError(
+            f"test_result must be a string, got "
+            f"{test_result.__class__.__name__}"
+        )
+
+    # --- Value validation: test_result must carry substance ---
+    if not test_result.strip():
+        raise ReviewError(
+            "test_result must be a non-empty, non-whitespace string"
+        )
+
+    # --- Build + append the reviewer_approval entry ---
+    entry = build_entry(
+        "reviewer_approval",
+        {
+            "story_id": story_id,
+            "approved": approved,
+            "test_result": test_result,
         },
     )
     _append_entry(entry)
@@ -1207,6 +1336,106 @@ def _cli_main(argv: list) -> int:
             return EXIT_OTHER
 
         print(f"story {story_id} -> {target_state}")
+        return EXIT_OK
+
+    # Story 15 — record-review subcommand. Args:
+    #   record-review <story_id> --approved <true|false> --test-result <text>
+    # Exit codes: EXIT_OK on success; EXIT_OTHER on bad args (missing flags,
+    # unparseable bool); EXIT_TRANSITION on any record_review failure
+    # (TypeError or ReviewError) — distinct from "unknown command", so the
+    # subcommand is recognized.
+    if cmd == "record-review":
+        if len(argv) >= 2 and argv[1] in ("--help", "-h"):
+            print(_HELP_TEXT)
+            return EXIT_OK
+
+        # Honor SM_LOG_PATH for hermetic subprocess testing.
+        env_log = os.environ.get("SM_LOG_PATH")
+        if env_log:
+            LOG_PATH = Path(env_log)
+
+        # Parse argv: positional story_id, then --approved <bool> and
+        # --test-result <str> as flag pairs (order-insensitive).
+        if len(argv) < 2:
+            print(
+                "usage: python -m sm record-review <story_id> "
+                "--approved <true|false> --test-result <text>",
+                file=_sys.stderr,
+            )
+            return EXIT_OTHER
+
+        story_id = argv[1]
+        approved_raw: Optional[str] = None
+        test_result: Optional[str] = None
+
+        i = 2
+        while i < len(argv):
+            tok = argv[i]
+            if tok == "--approved":
+                if i + 1 >= len(argv):
+                    print(
+                        "error: --approved requires a value (true|false)",
+                        file=_sys.stderr,
+                    )
+                    return EXIT_OTHER
+                approved_raw = argv[i + 1]
+                i += 2
+            elif tok == "--test-result":
+                if i + 1 >= len(argv):
+                    print(
+                        "error: --test-result requires a value",
+                        file=_sys.stderr,
+                    )
+                    return EXIT_OTHER
+                test_result = argv[i + 1]
+                i += 2
+            else:
+                print(
+                    f"error: unexpected argument {tok!r}",
+                    file=_sys.stderr,
+                )
+                return EXIT_OTHER
+
+        if approved_raw is None:
+            print(
+                "error: --approved is required (true|false)",
+                file=_sys.stderr,
+            )
+            return EXIT_OTHER
+        if test_result is None:
+            print(
+                "error: --test-result is required",
+                file=_sys.stderr,
+            )
+            return EXIT_OTHER
+
+        # Map "true"/"false" (case-insensitive) to a real bool. Anything
+        # else is a recognized failure (not "unknown command").
+        if approved_raw.lower() == "true":
+            approved = True
+        elif approved_raw.lower() == "false":
+            approved = False
+        else:
+            print(
+                f"error: --approved must be 'true' or 'false', got "
+                f"{approved_raw!r}",
+                file=_sys.stderr,
+            )
+            return EXIT_TRANSITION
+
+        try:
+            entry = record_review(story_id, approved, test_result)
+        except ReviewError as e:
+            print(f"error: {e}", file=_sys.stderr)
+            return EXIT_TRANSITION
+        except TypeError as e:
+            print(f"error: {e}", file=_sys.stderr)
+            return EXIT_TRANSITION
+        except Exception as e:  # noqa: BLE001 — catch-all
+            print(f"error: {e}", file=_sys.stderr)
+            return EXIT_OTHER
+
+        print(entry["id"])
         return EXIT_OK
 
     print(f"unknown command: {cmd!r}", file=_sys.stderr)

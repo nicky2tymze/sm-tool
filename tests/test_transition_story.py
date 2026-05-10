@@ -371,6 +371,7 @@ def test_in_review_to_accepted_writes_entry(isolated_log):
     target = in_sprint[0]
     sm.transition_story(target, "in_progress")
     sm.transition_story(target, "in_review")
+    sm.record_review(target, True, "ok")
     before = list(sm.read_entries())
     sm.transition_story(target, "accepted")
     after = list(sm.read_entries())
@@ -384,6 +385,7 @@ def test_in_review_to_accepted_entry_fields(isolated_log):
     target = in_sprint[0]
     sm.transition_story(target, "in_progress")
     sm.transition_story(target, "in_review")
+    sm.record_review(target, True, "ok")
     result = sm.transition_story(target, "accepted")
     assert result["from_state"] == "in_review"
     assert result["to_state"] == "accepted"
@@ -397,6 +399,7 @@ def test_in_review_to_accepted_derive_state_updates(isolated_log):
     target = in_sprint[0]
     sm.transition_story(target, "in_progress")
     sm.transition_story(target, "in_review")
+    sm.record_review(target, True, "ok")
     sm.transition_story(target, "accepted")
     state = sm.derive_state()
     assert state["story_states"][target] == "accepted"
@@ -510,6 +513,8 @@ def test_chain_notes_each_entry(isolated_log):
     sids, in_sprint, _ = _seed_sprint(5, 3)
     target = in_sprint[0]
     for to_state in ("in_progress", "in_review", "accepted"):
+        if to_state == "accepted":
+            sm.record_review(target, True, "ok")
         result = sm.transition_story(target, to_state)
         assert "notes" in result
         assert isinstance(result["notes"], str)
@@ -809,6 +814,7 @@ def test_accepted_to_in_progress_raises(isolated_log):
     target = in_sprint[0]
     sm.transition_story(target, "in_progress")
     sm.transition_story(target, "in_review")
+    sm.record_review(target, True, "ok")
     sm.transition_story(target, "accepted")
     with pytest.raises(sm.StoryTransitionError):
         sm.transition_story(target, "in_progress")
@@ -821,6 +827,7 @@ def test_accepted_to_in_review_raises(isolated_log):
     target = in_sprint[0]
     sm.transition_story(target, "in_progress")
     sm.transition_story(target, "in_review")
+    sm.record_review(target, True, "ok")
     sm.transition_story(target, "accepted")
     with pytest.raises(sm.StoryTransitionError):
         sm.transition_story(target, "in_review")
@@ -833,6 +840,7 @@ def test_accepted_to_rejected_raises(isolated_log):
     target = in_sprint[0]
     sm.transition_story(target, "in_progress")
     sm.transition_story(target, "in_review")
+    sm.record_review(target, True, "ok")
     sm.transition_story(target, "accepted")
     with pytest.raises(sm.StoryTransitionError):
         sm.transition_story(target, "rejected")
@@ -845,6 +853,7 @@ def test_accepted_to_planned_raises(isolated_log):
     target = in_sprint[0]
     sm.transition_story(target, "in_progress")
     sm.transition_story(target, "in_review")
+    sm.record_review(target, True, "ok")
     sm.transition_story(target, "accepted")
     with pytest.raises(sm.StoryTransitionError):
         sm.transition_story(target, "planned")
@@ -905,6 +914,7 @@ def test_terminal_accepted_error_names_current_state(isolated_log):
     target = in_sprint[0]
     sm.transition_story(target, "in_progress")
     sm.transition_story(target, "in_review")
+    sm.record_review(target, True, "ok")
     sm.transition_story(target, "accepted")
     with pytest.raises(sm.StoryTransitionError) as exc_info:
         sm.transition_story(target, "in_progress")
@@ -935,6 +945,7 @@ def test_accepted_terminal_log_unchanged(isolated_log):
     target = in_sprint[0]
     sm.transition_story(target, "in_progress")
     sm.transition_story(target, "in_review")
+    sm.record_review(target, True, "ok")
     sm.transition_story(target, "accepted")
     bytes_before = isolated_log.read_bytes()
     with pytest.raises(sm.StoryTransitionError):
@@ -1205,6 +1216,7 @@ def test_log_unchanged_after_terminal_transition(isolated_log):
     target = in_sprint[0]
     sm.transition_story(target, "in_progress")
     sm.transition_story(target, "in_review")
+    sm.record_review(target, True, "ok")
     sm.transition_story(target, "accepted")
     bytes_before = isolated_log.read_bytes()
     with pytest.raises(sm.StoryTransitionError):
@@ -1342,6 +1354,7 @@ def test_derive_state_chain_to_accepted(isolated_log):
     target = in_sprint[0]
     sm.transition_story(target, "in_progress")
     sm.transition_story(target, "in_review")
+    sm.record_review(target, True, "ok")
     sm.transition_story(target, "accepted")
     state = sm.derive_state()
     assert state["story_states"][target] == "accepted"
@@ -1407,6 +1420,7 @@ def test_chain_planned_to_accepted_one_story(isolated_log):
     target = in_sprint[0]
     a = sm.transition_story(target, "in_progress")
     b = sm.transition_story(target, "in_review")
+    sm.record_review(target, True, "ok")
     c = sm.transition_story(target, "accepted")
     assert a["to_state"] == "in_progress"
     assert b["to_state"] == "in_review"
@@ -1433,6 +1447,8 @@ def test_two_stories_one_accepted_one_rejected(isolated_log):
     sids, in_sprint, _ = _seed_sprint(5, 3)
     a, b = in_sprint[0], in_sprint[1]
     for to_state in ("in_progress", "in_review", "accepted"):
+        if to_state == "accepted":
+            sm.record_review(a, True, "ok")
         sm.transition_story(a, to_state)
     for to_state in ("in_progress", "in_review", "rejected"):
         sm.transition_story(b, to_state)

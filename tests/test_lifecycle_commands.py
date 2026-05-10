@@ -207,12 +207,19 @@ def _advance(log_path: pathlib.Path, story_id: str, *target_states: str
     `sm.transition_story` calls (not the CLI under test), so happy-path
     tests can stage a story into the state we want without depending on
     the CLI we're testing.
+
+    Story 15 extension: if any target state is `accepted`, a satisfying
+    `reviewer_approval` entry is recorded immediately beforehand so the
+    accept gate is satisfied. Mirrors how the CLI flow expects callers to
+    chain `record-review` before `accept`.
     """
     import sm
     orig_log = sm.LOG_PATH
     try:
         sm.LOG_PATH = log_path
         for to_state in target_states:
+            if to_state == "accepted":
+                sm.record_review(story_id, True, "ok")
             sm.transition_story(story_id, to_state)
     finally:
         sm.LOG_PATH = orig_log
@@ -427,6 +434,9 @@ def test_cli_accept_exits_zero_on_in_review(cli_log):
     _, in_sprint, _ = _seed_sprint_at(log_path, n_stories=5, cut_at=3)
     target = in_sprint[0]
     _advance(log_path, target, "in_progress", "in_review")
+    assert _run_cli(env, "record-review", target,
+                    "--approved", "true",
+                    "--test-result", "ok").returncode == 0
 
     result = _run_cli(env, "accept", target)
     assert result.returncode == 0, (
@@ -442,6 +452,9 @@ def test_cli_accept_moves_story_to_accepted(cli_log):
     _, in_sprint, _ = _seed_sprint_at(log_path, n_stories=5, cut_at=3)
     target = in_sprint[0]
     _advance(log_path, target, "in_progress", "in_review")
+    assert _run_cli(env, "record-review", target,
+                    "--approved", "true",
+                    "--test-result", "ok").returncode == 0
 
     result = _run_cli(env, "accept", target)
     assert result.returncode == 0
@@ -455,6 +468,9 @@ def test_cli_accept_writes_one_story_state_change(cli_log):
     _, in_sprint, _ = _seed_sprint_at(log_path, n_stories=5, cut_at=3)
     target = in_sprint[0]
     _advance(log_path, target, "in_progress", "in_review")
+    assert _run_cli(env, "record-review", target,
+                    "--approved", "true",
+                    "--test-result", "ok").returncode == 0
     before = log_path.read_bytes()
 
     result = _run_cli(env, "accept", target)
@@ -476,6 +492,9 @@ def test_cli_accept_entry_has_correct_to_state(cli_log):
     _, in_sprint, _ = _seed_sprint_at(log_path, n_stories=5, cut_at=3)
     target = in_sprint[0]
     _advance(log_path, target, "in_progress", "in_review")
+    assert _run_cli(env, "record-review", target,
+                    "--approved", "true",
+                    "--test-result", "ok").returncode == 0
 
     result = _run_cli(env, "accept", target)
     assert result.returncode == 0
@@ -768,6 +787,9 @@ def test_cli_accept_success_stdout_mentions_new_state(cli_log):
     _, in_sprint, _ = _seed_sprint_at(log_path, n_stories=5, cut_at=3)
     target = in_sprint[0]
     _advance(log_path, target, "in_progress", "in_review")
+    assert _run_cli(env, "record-review", target,
+                    "--approved", "true",
+                    "--test-result", "ok").returncode == 0
 
     result = _run_cli(env, "accept", target)
     assert result.returncode == 0
@@ -916,6 +938,9 @@ def test_cli_accept_on_terminal_story_rejected_independently(cli_log):
     # Drive A to accepted via the CLI commands themselves (end-to-end).
     assert _run_cli(env, "start", a).returncode == 0
     assert _run_cli(env, "submit", a).returncode == 0
+    assert _run_cli(env, "record-review", a,
+                    "--approved", "true",
+                    "--test-result", "ok").returncode == 0
     assert _run_cli(env, "accept", a).returncode == 0
 
     # accept on A again is rejected (terminal).
@@ -940,9 +965,12 @@ def test_cli_two_stories_diverge(cli_log):
     _, in_sprint, _ = _seed_sprint_at(log_path, n_stories=5, cut_at=3)
     a, b = in_sprint[0], in_sprint[1]
 
-    # A: start -> submit -> accept
+    # A: start -> submit -> record-review -> accept
     assert _run_cli(env, "start", a).returncode == 0
     assert _run_cli(env, "submit", a).returncode == 0
+    assert _run_cli(env, "record-review", a,
+                    "--approved", "true",
+                    "--test-result", "ok").returncode == 0
     assert _run_cli(env, "accept", a).returncode == 0
     # B: start -> submit -> reject
     assert _run_cli(env, "start", b).returncode == 0
@@ -979,6 +1007,14 @@ def test_cli_full_chain_to_accepted(cli_log):
     )
     assert (
         _derive_state_at(log_path)["story_states"][target] == "in_review"
+    )
+
+    rrr = _run_cli(env, "record-review", target,
+                   "--approved", "true",
+                   "--test-result", "ok")
+    assert rrr.returncode == 0, (
+        f"record-review failed;\nstdout={rrr.stdout!r}"
+        f"\nstderr={rrr.stderr!r}"
     )
 
     r3 = _run_cli(env, "accept", target)
