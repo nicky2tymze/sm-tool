@@ -380,11 +380,24 @@ def ingest(path) -> dict:
             )
         seen_ids[rid] = i
 
+    # --- Single-active-iteration enforcement (via derive_state).
+    # Story 7 precedence: this check fires BEFORE the dup-id check. When
+    # both would fire (i.e., the new handoff's iteration_id matches the
+    # currently-open iteration), the operator gets the actionable
+    # "close it first" message rather than the cosmetic dup-id one.
+    state = derive_state()
+    if state["active_iteration"] is not None:
+        open_id = state["active_iteration"]["iteration_id"]
+        raise IngestActiveError(
+            f"cannot ingest: iteration {open_id!r} is already open; "
+            f"close before re-ingesting"
+        )
+
     # --- Duplicate iteration_id check (Story 6).
     # Scan ALL prior `iteration_open` entries — including ones that have
-    # since been closed or force-closed. This is independent of (and runs
-    # before) the single-active check: a duplicate is a duplicate even
-    # if nothing is currently open. Pure read of the log; no write.
+    # since been closed or force-closed. With Story 7's precedence flip,
+    # this only fires when nothing is currently open AND the new id was
+    # used by a prior (now-closed) iteration. Pure read of the log; no write.
     for prior in read_entries():
         if (prior.get("type") == "iteration_open"
                 and prior.get("iteration_id") == iter_id):
@@ -392,14 +405,6 @@ def ingest(path) -> dict:
                 f"cannot ingest: iteration_id {iter_id!r} was already "
                 f"used by a prior iteration_open entry"
             )
-
-    # --- Single-active-iteration enforcement (via derive_state) ---
-    state = derive_state()
-    if state["active_iteration"] is not None:
-        open_id = state["active_iteration"]["iteration_id"]
-        raise IngestActiveError(
-            f"cannot ingest: iteration {open_id!r} is already open"
-        )
 
     # --- All validation passed; build + append ---
     entry = build_entry("iteration_open", handoff)
