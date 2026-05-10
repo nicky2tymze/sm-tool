@@ -51,6 +51,8 @@ __all__ = [
     "sprint_cut",
     "SprintCutError",
     "SprintCutLockedError",
+    "transition_story",
+    "StoryTransitionError",
 ]
 
 
@@ -141,6 +143,41 @@ class SprintCutLockedError(SprintCutError):
     LATEST prior sprint_cut entry's in_sprint_story_ids) has left the
     `planned` state. Lock is replay-derived — no separate flag persisted.
     Operator must close or force-close the iteration to proceed."""
+
+
+# ---------------------------------------------------------------------------
+# Story 13 — per-story lifecycle state machine writer. The graph used by
+# `transition_story` is intentionally narrower than `_VALID_TRANSITIONS`
+# (which `derive_state` uses): Story 13 does not call `force_closed` — that
+# transition is Story 19's lane.
+# ---------------------------------------------------------------------------
+
+class StoryTransitionError(ValueError):
+    """Raised when transition_story rejects a transition: no active
+    iteration, no active sprint, story not in sprint, terminal-already,
+    invalid state name, or illegal lifecycle transition. Subclasses
+    ValueError so existing `except ValueError` callers keep working."""
+
+
+# Story 13 graph — exposes only the operator-driven transitions. The
+# force_closed transitions remain in `_VALID_TRANSITIONS` for derive_state
+# replay; Story 19 will own the writer.
+_STORY_13_TRANSITIONS: dict = {
+    "planned": frozenset({"in_progress"}),
+    "in_progress": frozenset({"in_review"}),
+    "in_review": frozenset({"accepted", "rejected"}),
+    "accepted": frozenset(),       # terminal
+    "rejected": frozenset(),       # terminal
+}
+
+# Full set of state names recognized by the lifecycle. Used to distinguish
+# "invalid state name" (e.g. typos, ' in_progress', 'PLANNED') from
+# "valid name but illegal transition from current state" — both raise
+# StoryTransitionError, but the error message differs.
+_STORY_STATES: frozenset = frozenset({
+    "planned", "in_progress", "in_review", "accepted", "rejected",
+    "force_closed",
+})
 
 
 def resolve_role_spec(role: str) -> Path:
@@ -823,6 +860,143 @@ def sprint_cut(n: int) -> dict:
     return entry
 
 
+def transition_story(
+    story_id: str,
+    to_state: str,
+    notes: str = "",
+) -> dict:
+    """Transition one in-sprint story to a new lifecycle state.
+
+    Story 13 contract (Sprint 2, first story):
+
+      - Validates type-first: `story_id`, `to_state`, `notes` must each be
+        `str` (bool is rejected explicitly — `True`/`False` are not strings
+        of value). Any non-string raises `TypeError`. No log write.
+
+      - Reads state via `derive_state()`. Failure modes (all raise
+        `StoryTransitionError`, no log write):
+            * no active iteration
+            * no active sprint (no `sprint_cut` entry yet)
+            * `story_id` is not in the active sprint (unknown OR deferred)
+            * current state is terminal (`accepted` / `rejected`)
+            * `to_state` is not a recognized state name (typo, whitespace,
+              wrong case, etc.)
+            * `to_state` is recognized but the transition is illegal from
+              the current state (skip / backwards / self-loop / force_closed
+              — force_closed is Story 19's lane, not Story 13's)
+
+      - Story 13 allowed transitions (force_closed handled by Story 19):
+            planned     -> in_progress
+            in_progress -> in_review
+            in_review   -> accepted
+            in_review   -> rejected
+            accepted, rejected are TERMINAL
+
+      - On success: writes a single `story_state_change` log entry via
+        `build_entry` + `_append_entry`. Entry shape:
+            {
+              "id", "type", "timestamp" (auto-stamped),
+              "story_id": "<hex>",
+              "from_state": "<current>",
+              "to_state":   "<requested>",
+              "notes":      "<free text — may be empty>",
+            }
+        Returns the appended entry dict.
+
+      - Failure invariant: log.jsonl is byte-for-byte unchanged on any
+        validation/argument failure (TypeError or StoryTransitionError).
+    """
+    # --- Type validation FIRST (before any log read) ---
+    # bool is an int subclass, not a str subclass, so isinstance(x, str)
+    # already rejects True/False. No special-case needed here, but spell
+    # the rejection out for symmetry with the rest of the module.
+    if not isinstance(story_id, str):
+        raise TypeError(
+            f"story_id must be a string, got "
+            f"{story_id.__class__.__name__}"
+        )
+    if not isinstance(to_state, str):
+        raise TypeError(
+            f"to_state must be a string, got "
+            f"{to_state.__class__.__name__}"
+        )
+    if not isinstance(notes, str):
+        raise TypeError(
+            f"notes must be a string, got "
+            f"{notes.__class__.__name__}"
+        )
+
+    # --- Replay state. Uses module-level derive_state so test
+    # monkeypatching of sm.derive_state takes effect. ---
+    state = derive_state()
+
+    if state["active_iteration"] is None:
+        raise StoryTransitionError(
+            "no active iteration; ingest a handoff first before "
+            "transitioning stories"
+        )
+
+    if state["sprint_cut"] is None:
+        raise StoryTransitionError(
+            "no active sprint (no sprint_cut entry yet); cut the sprint "
+            "before transitioning stories"
+        )
+
+    # --- Find the LATEST sprint_cut entry's in_sprint_story_ids.
+    # derive_state stores only the cut_position int; we need the actual id
+    # list to enforce in-sprint membership. Pure read of the log.
+    in_sprint_ids: list = []
+    for entry in read_entries():
+        if entry.get("type") == "sprint_cut":
+            in_sprint_ids = entry.get("in_sprint_story_ids", []) or []
+
+    if story_id not in in_sprint_ids:
+        raise StoryTransitionError(
+            f"story_id {story_id!r} is not in the active sprint; "
+            f"only in-sprint stories may be transitioned"
+        )
+
+    # --- Determine current state. Membership in in_sprint_ids already
+    # guarantees the story exists in the backlog, hence in story_states.
+    current_state = state["story_states"].get(story_id, "planned")
+
+    if current_state in {"accepted", "rejected", "force_closed"}:
+        raise StoryTransitionError(
+            f"story {story_id!r} is in terminal state {current_state!r}; "
+            f"cannot transition further"
+        )
+
+    # --- Validate the to_state name itself (typos, casing, whitespace) ---
+    if to_state not in _STORY_STATES:
+        raise StoryTransitionError(
+            f"to_state {to_state!r} is not a recognized lifecycle state; "
+            f"must be one of {sorted(_STORY_STATES)!r}"
+        )
+
+    # --- Validate the transition is legal from the current state under the
+    # Story 13 graph (force_closed deliberately not exposed here — Story 19).
+    allowed = _STORY_13_TRANSITIONS.get(current_state, frozenset())
+    if to_state not in allowed:
+        raise StoryTransitionError(
+            f"illegal transition from {current_state!r} to {to_state!r} "
+            f"for story {story_id!r}; allowed targets from "
+            f"{current_state!r} are {sorted(allowed)!r}"
+        )
+
+    # --- All validation passed; build + append a single entry ---
+    entry = build_entry(
+        "story_state_change",
+        {
+            "story_id": story_id,
+            "from_state": current_state,
+            "to_state": to_state,
+            "notes": notes,
+        },
+    )
+    _append_entry(entry)
+    return entry
+
+
 # ---------------------------------------------------------------------------
 # CLI surface — `python -m sm <command> <args...>`
 # ---------------------------------------------------------------------------
@@ -839,6 +1013,7 @@ EXIT_DUP_ID = 5
 EXIT_SINGLE_ACTIVE = 6
 EXIT_UNKNOWN_REQ = 7
 EXIT_SPRINT_CUT = 8
+EXIT_TRANSITION = 9
 
 
 _HELP_TEXT = """\
