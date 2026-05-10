@@ -64,6 +64,8 @@ __all__ = [
     "EXIT_CLOSE",
     "force_close",
     "ForceCloseError",
+    "execute",
+    "ExecuteError",
 ]
 
 
@@ -235,6 +237,19 @@ class ForceCloseError(ValueError):
     """Raised when force_close cannot proceed: empty/whitespace-only reason,
     no active iteration, no story backlog, or no sprint_cut. Subclasses
     ValueError so existing `except ValueError` callers keep working."""
+
+
+# ---------------------------------------------------------------------------
+# Story 23 — typed execute error. Subclasses ValueError so existing
+# `except ValueError` callers keep working. Raised by `execute` on every
+# state-validation failure (no active iteration, no sprint_cut, story not in
+# sprint, current state not in {planned, in_progress}). Type errors stay
+# TypeError; the NotImplementedError default-spawn case stays a stdlib
+# NotImplementedError so the CLI maps it via the catch-all.
+# ---------------------------------------------------------------------------
+
+class ExecuteError(ValueError):
+    """Raised when execute pipeline cannot proceed."""
 
 
 # Story 13 graph — exposes only the operator-driven transitions. The
@@ -1693,6 +1708,269 @@ def force_close(reason: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Story 23 — TestWriter -> Coder -> Reviewer execution pipeline.
+#
+# `execute(story_id, spawn_test_writer, spawn_coder, spawn_reviewer)` drives
+# the full per-story build pipeline:
+#
+#   Step 1: planned -> in_progress             (story_state_change)
+#   Step 2: spawn_test_writer(spec, story)     -> testwriter_output entry
+#   Step 3: spawn_coder(spec, story, tc)       -> coder_output entry
+#   Step 4: in_progress -> in_review           (story_state_change)
+#   Step 5: spawn_reviewer(spec, story, tc, ic) -> reviewer_approval entry
+#   Step 6: in_review -> accepted | rejected   (story_state_change)
+#
+# Each spawn callable is injected — Iter 1 ships a stub-driven path; real
+# agent integration arrives in Iter 2 (the NotImplementedError default
+# default makes that explicit).
+# ---------------------------------------------------------------------------
+
+
+def execute(
+    story_id: str,
+    spawn_test_writer: Optional[Callable] = None,
+    spawn_coder: Optional[Callable] = None,
+    spawn_reviewer: Optional[Callable] = None,
+) -> dict:
+    """Drive one in-sprint story through the full TestWriter -> Coder ->
+    Reviewer build pipeline.
+
+    Story 23 contract:
+
+      - All three `spawn_*` kwargs default to `None`. If ANY of them is
+        `None`, raises `NotImplementedError` mentioning Iter 2. No state read,
+        no log write.
+
+      - Type validation: `story_id` must be `str`. Non-string raises
+        `TypeError`. No log write, no spawn callable invoked.
+
+      - State validation (all raise `ExecuteError`, no log write, no spawn
+        callable invoked):
+            * no active iteration
+            * no sprint_cut yet
+            * `story_id` not in the active sprint (unknown OR deferred)
+            * current state not in {planned, in_progress}
+
+      - On valid input the pipeline runs in fixed order:
+            Step 1 (only if current state is planned):
+                transition planned -> in_progress
+            Step 2:
+                spawn_test_writer(role_spec_path, story) -> test_code (str)
+                append `testwriter_output` entry carrying story_id,
+                role_spec_path, role_spec_hash, output (test_code)
+            Step 3:
+                spawn_coder(role_spec_path, story, test_code) -> impl_code (str)
+                append `coder_output` entry carrying story_id, role_spec_path,
+                role_spec_hash, output (impl_code)
+            Step 4:
+                transition in_progress -> in_review
+            Step 5:
+                spawn_reviewer(role_spec_path, story, test_code, impl_code)
+                    -> {"approved": bool, "test_result": str}
+            Step 6:
+                If approved is True AND test_result.strip() is non-empty:
+                    record_review(story_id, True, test_result)
+                    transition in_review -> accepted
+                Else:
+                    record_review(story_id, False, test_result) if non-empty,
+                    else write a placeholder reviewer_approval entry directly
+                    so the audit trail is honest about the reviewer's call.
+                    transition in_review -> rejected
+
+      - Returns the FINAL `story_state_change` entry (accepted or rejected).
+
+      - Failure invariants:
+            * Pre-spawn validation failures leave the log byte-for-byte
+              unchanged and never invoke any spawn callable.
+            * Post-spawn partial failures leave already-written entries in
+              place (truthful audit trail).
+    """
+    # --- Default-spawn check FIRST (before any type / state validation).
+    # NotImplementedError must fire regardless of state, so callers exploring
+    # the "what happens if I just call execute()" path get the right signal
+    # without leaking log entries.
+    if (spawn_test_writer is None
+            or spawn_coder is None
+            or spawn_reviewer is None):
+        raise NotImplementedError(
+            "real agent integration ships in Iter 2 — pass "
+            "spawn_test_writer / spawn_coder / spawn_reviewer for "
+            "testing/manual ops"
+        )
+
+    # --- Type validation: story_id must be str (before any state read). ---
+    if not isinstance(story_id, str):
+        raise TypeError(
+            f"story_id must be a string, got "
+            f"{story_id.__class__.__name__}"
+        )
+
+    # --- Replay state (pure read; no log write). ---
+    state = derive_state()
+
+    if state["active_iteration"] is None:
+        raise ExecuteError(
+            "no active iteration; ingest a handoff first before executing "
+            "a story"
+        )
+
+    if state["sprint_cut"] is None:
+        raise ExecuteError(
+            "no active sprint (no sprint_cut entry yet); cut the sprint "
+            "before executing a story"
+        )
+
+    # --- Find the LATEST sprint_cut entry's in_sprint_story_ids. ---
+    in_sprint_ids: list = []
+    for entry in read_entries():
+        if entry.get("type") == "sprint_cut":
+            in_sprint_ids = entry.get("in_sprint_story_ids", []) or []
+
+    if story_id not in in_sprint_ids:
+        raise ExecuteError(
+            f"story_id {story_id!r} is not in the active sprint; only "
+            f"in-sprint stories may be executed"
+        )
+
+    # --- Look up the full story dict from the backlog. Membership in
+    # in_sprint_ids guarantees the story exists in the backlog.
+    story_dict: Optional[dict] = None
+    for s in state["story_backlog"]:
+        if s.get("story_id") == story_id:
+            story_dict = s
+            break
+    if story_dict is None:
+        raise ExecuteError(
+            f"story {story_id!r} not found in story backlog"
+        )
+
+    # --- Current-state gate: only planned / in_progress are executable. ---
+    current_state = state["story_states"].get(story_id, "planned")
+    if current_state not in ("planned", "in_progress"):
+        raise ExecuteError(
+            f"story {story_id!r} is in state {current_state!r}; execute "
+            f"requires the story to be in 'planned' or 'in_progress'"
+        )
+
+    # ----------------------------------------------------------------------
+    # All validation passed. From here on, the pipeline runs and writes
+    # entries to the log. Partial failures leave written entries in place.
+    # ----------------------------------------------------------------------
+
+    # --- Step 1: planned -> in_progress (skip if already in_progress). ---
+    if current_state == "planned":
+        transition_story(
+            story_id,
+            "in_progress",
+            notes="execute: starting pipeline",
+        )
+
+    # --- Step 2: TestWriter. ---
+    tw_path = resolve_role_spec("test_writer")
+    tw_hash = _role_spec_hash("test_writer")
+    test_code = spawn_test_writer(str(tw_path), story_dict)
+    tw_entry = build_entry(
+        "testwriter_output",
+        {
+            "story_id": story_id,
+            "role_spec_path": str(tw_path),
+            "role_spec_hash": tw_hash,
+            "output": test_code,
+        },
+    )
+    _append_entry(tw_entry)
+
+    # --- Step 3: Coder. ---
+    coder_path = resolve_role_spec("coder")
+    coder_hash = _role_spec_hash("coder")
+    impl_code = spawn_coder(str(coder_path), story_dict, test_code)
+    coder_entry = build_entry(
+        "coder_output",
+        {
+            "story_id": story_id,
+            "role_spec_path": str(coder_path),
+            "role_spec_hash": coder_hash,
+            "output": impl_code,
+        },
+    )
+    _append_entry(coder_entry)
+
+    # --- Step 4: in_progress -> in_review. ---
+    transition_story(
+        story_id,
+        "in_review",
+        notes="execute: pipeline complete, in review",
+    )
+
+    # --- Step 5: Reviewer. ---
+    reviewer_path = resolve_role_spec("reviewer")
+    reviewer_result = spawn_reviewer(
+        str(reviewer_path), story_dict, test_code, impl_code
+    )
+
+    approved_raw = reviewer_result.get("approved") if isinstance(
+        reviewer_result, dict
+    ) else None
+    test_result_raw = reviewer_result.get("test_result") if isinstance(
+        reviewer_result, dict
+    ) else None
+
+    approved = bool(approved_raw)
+    test_result_str = test_result_raw if isinstance(
+        test_result_raw, str
+    ) else ""
+
+    # Defense in depth: empty / whitespace-only test_result routes to
+    # rejected even if the reviewer said approved=True. The accept gate in
+    # transition_story enforces the same rule on the read side.
+    if not test_result_str.strip():
+        approved = False
+
+    # --- Step 6: record review + final transition. ---
+    if approved:
+        # Happy approve path: record_review writes the reviewer_approval
+        # entry that satisfies Story 15's accept gate, then transition
+        # in_review -> accepted.
+        record_review(story_id, True, test_result_str)
+        final_entry = transition_story(
+            story_id,
+            "accepted",
+            notes="execute: reviewer approved",
+        )
+    else:
+        # Reject path: write a reviewer_approval entry capturing the
+        # reviewer's actual call (approved bool + test_result text), then
+        # transition in_review -> rejected. record_review enforces the
+        # non-empty test_result rule; if the reviewer returned empty /
+        # whitespace text we fall back to a synthetic placeholder so the
+        # audit trail stays honest about the reviewer's verdict.
+        if test_result_str.strip():
+            try:
+                record_review(story_id, False, test_result_str)
+            except Exception:
+                # Defense in depth: don't block rejection on the
+                # reviewer_approval write failing.
+                pass
+        else:
+            placeholder = build_entry(
+                "reviewer_approval",
+                {
+                    "story_id": story_id,
+                    "approved": False,
+                    "test_result": test_result_str,
+                },
+            )
+            _append_entry(placeholder)
+        final_entry = transition_story(
+            story_id,
+            "rejected",
+            notes="execute: reviewer rejected",
+        )
+
+    return final_entry
+
+
+# ---------------------------------------------------------------------------
 # CLI surface — `python -m sm <command> <args...>`
 # ---------------------------------------------------------------------------
 
@@ -2118,6 +2396,65 @@ def _cli_main(argv: list) -> int:
 
         print(entry["id"])
         return EXIT_OK
+
+    # Story 23 — execute pipeline subcommand. Args:
+    #   execute <story_id>
+    # No injection point for spawn callables from the CLI in Iter 1 — the
+    # default-spawn path raises NotImplementedError and the CLI maps it to
+    # EXIT_OTHER. Real-agent injection ships in Iter 2.
+    # Exit codes:
+    #   EXIT_OK         on accepted (happy approve path)
+    #   EXIT_TRANSITION on rejected (a valid completion that isn't accept)
+    #   EXIT_OTHER      on validation failure / NotImplementedError / other
+    if cmd == "execute":
+        if len(argv) >= 2 and argv[1] in ("--help", "-h"):
+            print(_HELP_TEXT)
+            return EXIT_OK
+        if len(argv) != 2:
+            print(
+                "usage: python -m sm execute <story_id>",
+                file=_sys.stderr,
+            )
+            return EXIT_OTHER
+
+        story_id = argv[1]
+
+        # Honor SM_LOG_PATH for hermetic subprocess testing.
+        env_log = os.environ.get("SM_LOG_PATH")
+        if env_log:
+            LOG_PATH = Path(env_log)
+
+        try:
+            final_entry = execute(story_id)
+        except NotImplementedError as e:
+            print(f"error: {e}", file=_sys.stderr)
+            return EXIT_OTHER
+        except ExecuteError as e:
+            print(f"error: {e}", file=_sys.stderr)
+            return EXIT_OTHER
+        except TypeError as e:
+            print(f"error: {e}", file=_sys.stderr)
+            return EXIT_OTHER
+        except Exception as e:  # noqa: BLE001 — catch-all
+            print(f"error: {e}", file=_sys.stderr)
+            return EXIT_OTHER
+
+        # Map the final state to an exit code. Accepted -> success;
+        # rejected -> EXIT_TRANSITION (a valid completion, but not "accept").
+        to_state = (
+            final_entry.get("to_state")
+            if isinstance(final_entry, dict)
+            else None
+        )
+        if to_state == "accepted":
+            print(f"story {story_id} -> accepted")
+            return EXIT_OK
+        if to_state == "rejected":
+            print(f"story {story_id} -> rejected")
+            return EXIT_TRANSITION
+        # Any other terminal would be unexpected here; report it generically.
+        print(f"story {story_id} -> {to_state!r}")
+        return EXIT_OTHER
 
     print(f"unknown command: {cmd!r}", file=_sys.stderr)
     print(_HELP_TEXT, file=_sys.stderr)
