@@ -47,6 +47,7 @@ __all__ = [
     "decompose",
     "DecomposeOutputParseError",
     "DecomposeOutputShapeError",
+    "DecomposeUnknownRequirementError",
 ]
 
 
@@ -104,6 +105,14 @@ class DecomposeOutputShapeError(ValueError):
     """The agent's JSON parsed cleanly, but does not match the required
     story-backlog schema (missing keys, wrong types, bad sizes, non-1..N
     sequences, etc.)."""
+
+
+class DecomposeUnknownRequirementError(ValueError):
+    """A story's `requirement_ids` references an id that does not appear
+    in the active iteration's handoff requirements list. Distinct from
+    `DecomposeOutputShapeError` — both subclass ValueError so existing
+    `except ValueError` callers keep working, but callers can branch on
+    the exact class for cross-reference vs shape failures."""
 
 
 def resolve_role_spec(role: str) -> Path:
@@ -629,6 +638,19 @@ def decompose(spawn_agent: Optional[Callable] = None) -> dict:
                 f"story at index {idx} requirement_ids must be a list of "
                 f"strings"
             )
+        # acceptance_criteria non-empty after strip (Story 10 tightening).
+        # Story 9 already requires the field be present; Story 10 adds the
+        # rule that whitespace-only AC (incl. empty string, tabs, newlines)
+        # is a shape error — the field must carry substance.
+        ac_val = s["acceptance_criteria"]
+        if not isinstance(ac_val, str) or not ac_val.strip():
+            seq_marker = s.get("sequence", idx + 1)
+            title_marker = s.get("title", f"index {idx}")
+            raise DecomposeOutputShapeError(
+                f"story {seq_marker!r} ({title_marker!r}) field "
+                f"'acceptance_criteria' must be a non-empty, "
+                f"non-whitespace-only string"
+            )
 
     # --- Sequence validation: must be exactly 1..N strictly increasing ---
     sequences = [s["sequence"] for s in stories]
@@ -638,6 +660,28 @@ def decompose(spawn_agent: Optional[Callable] = None) -> dict:
             f"sequences must be strictly 1..N, got {sequences!r} "
             f"(expected {expected!r})"
         )
+
+    # --- Cross-reference check (Story 10): every requirement_id in every
+    # story must appear in the active iteration's handoff requirements
+    # list. Unknown ids → DecomposeUnknownRequirementError (distinct from
+    # shape errors). Runs AFTER shape validation (so we know stories have
+    # the right shape) and BEFORE story_id minting + log write (so any
+    # failure leaves the log byte-for-byte unchanged).
+    valid_ids = {
+        r["requirement_id"]
+        for r in requirements
+        if isinstance(r, dict) and "requirement_id" in r
+    }
+    for s in stories:
+        for rid in s["requirement_ids"]:
+            if rid not in valid_ids:
+                sequence = s.get("sequence")
+                title = s.get("title")
+                raise DecomposeUnknownRequirementError(
+                    f"story {sequence!r} ({title!r}) references unknown "
+                    f"requirement_id {rid!r}; valid ids are "
+                    f"{sorted(valid_ids)!r}"
+                )
 
     # --- Mint story_ids (override any agent-supplied id) ---
     enriched_stories = []
@@ -673,6 +717,7 @@ EXIT_JSON = 3
 EXIT_SHAPE = 4
 EXIT_DUP_ID = 5
 EXIT_SINGLE_ACTIVE = 6
+EXIT_UNKNOWN_REQ = 7
 
 
 _HELP_TEXT = """\
@@ -732,6 +777,9 @@ def _cli_main(argv: list) -> int:
         except DecomposeOutputShapeError as e:
             print(f"error: {e}", file=_sys.stderr)
             return EXIT_SHAPE
+        except DecomposeUnknownRequirementError as e:
+            print(f"error: {e}", file=_sys.stderr)
+            return EXIT_UNKNOWN_REQ
         except ValueError as e:
             print(f"error: {e}", file=_sys.stderr)
             return EXIT_OTHER
