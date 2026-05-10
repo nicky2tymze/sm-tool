@@ -57,6 +57,8 @@ __all__ = [
     "ReviewError",
     "AcceptGateError",
     "status",
+    "aggregate_requirements",
+    "AggregateError",
 ]
 
 
@@ -185,6 +187,20 @@ class AcceptGateError(StoryTransitionError):
     test_result that is non-empty after strip. Subclasses
     StoryTransitionError so the CLI's existing handler maps it to
     EXIT_TRANSITION (9) automatically."""
+
+
+# ---------------------------------------------------------------------------
+# Story 17 — typed aggregation error. Subclasses ValueError so existing
+# `except ValueError` callers keep working. Raised by aggregate_requirements
+# on two defense-in-depth conditions: no active iteration, and orphan
+# requirement_ids (a requirement in the iteration with no story rolling up).
+# ---------------------------------------------------------------------------
+
+class AggregateError(ValueError):
+    """Raised when aggregate_requirements cannot produce a result: no active
+    iteration, or one-or-more orphan requirement_ids (requirements declared
+    on the iteration with no story rolling up to them). Subclasses
+    ValueError so existing `except ValueError` callers keep working."""
 
 
 # Story 13 graph — exposes only the operator-driven transitions. The
@@ -1200,6 +1216,115 @@ def status() -> str:
             )
 
     return "\n".join(lines) + "\n"
+
+
+def aggregate_requirements(state: dict) -> dict:
+    """Aggregate story lifecycle states up to a per-requirement status.
+
+    Story 17 contract:
+
+      - Pure function: never calls `_append_entry`, never calls
+        `read_entries`. Operates on the `state` argument only — the dict
+        shape produced by `derive_state()`. Two calls produce equal results
+        on the same input; mutating the returned dict does not affect a
+        subsequent call; the input dict is not mutated.
+
+      - Inputs:
+            state["active_iteration"]: dict or None
+                  iteration_id + requirements (list of {requirement_id})
+            state["story_backlog"]: list[dict]
+                  each story dict carries `story_id` and `requirement_ids`
+            state["story_states"]: dict[story_id -> lifecycle_state]
+
+      - Returns dict[requirement_id -> status] where status is one of
+        `"accepted"`, `"rejected"`, or `"partial"`.
+
+      - Rules:
+            * `accepted` — every story rolling up to the requirement is in
+              lifecycle state `accepted`.
+            * `rejected` — any story rolling up to the requirement is in
+              `rejected` OR `force_closed`. Wins over accepted/partial.
+            * `partial` — mixed states without triggering rejected (some
+              accepted + some in-flight, or all in-flight).
+
+      - Raises `AggregateError` (a ValueError subclass) when:
+            * `state["active_iteration"]` is None — operator can't
+              aggregate against nothing. Message mentions "no active
+              iteration".
+            * Any requirement_id declared in the iteration has no story
+              rolling up to it. Message names every orphan id.
+    """
+    # --- No active iteration --------------------------------------------
+    active = state.get("active_iteration")
+    if active is None:
+        raise AggregateError(
+            "no active iteration; ingest a handoff and decompose before "
+            "aggregating requirements"
+        )
+
+    # --- Collect declared requirement_ids in iteration-declared order ---
+    declared_reqs = []
+    seen = set()
+    for r in active.get("requirements", []) or []:
+        if not isinstance(r, dict):
+            continue
+        rid = r.get("requirement_id")
+        if rid is None or rid in seen:
+            continue
+        declared_reqs.append(rid)
+        seen.add(rid)
+
+    backlog = state.get("story_backlog", []) or []
+    story_states = state.get("story_states", {}) or {}
+
+    # --- Build req_id -> list of story lifecycle states. Multi-requirement
+    # stories contribute to every requirement they roll up to.
+    req_to_states: dict = {rid: [] for rid in declared_reqs}
+    for s in backlog:
+        sid = s.get("story_id")
+        rids = s.get("requirement_ids", []) or []
+        lifecycle = story_states.get(sid, "planned")
+        for rid in rids:
+            # Only count contributions to declared requirements. Stories
+            # carrying a requirement_id that isn't on the iteration are
+            # not aggregated against (defense in depth — Story 10
+            # validation already prevents this on the live path).
+            if rid in req_to_states:
+                req_to_states[rid].append(lifecycle)
+
+    # --- Orphan check: declared requirement with zero rolling-up stories.
+    orphans = [rid for rid in declared_reqs if not req_to_states[rid]]
+    if orphans:
+        # Stable order — preserves the iteration-declared order so the
+        # operator sees the orphan(s) in the same sequence as the handoff.
+        names = ", ".join(repr(rid) for rid in orphans)
+        raise AggregateError(
+            f"orphan requirement(s) with no story rolling up: {names}; "
+            f"every iteration requirement must be covered by at least "
+            f"one story (Story 10 validation should prevent this — this "
+            f"check is defense in depth)"
+        )
+
+    # --- Apply the aggregation rule per requirement.
+    result: dict = {}
+    for rid in declared_reqs:
+        states_for_req = req_to_states[rid]
+        # Rejected rule short-circuits: any story rejected OR force_closed
+        # → requirement is rejected.
+        if any(
+            s == "rejected" or s == "force_closed"
+            for s in states_for_req
+        ):
+            result[rid] = "rejected"
+            continue
+        # Accepted rule: every story must be accepted.
+        if all(s == "accepted" for s in states_for_req):
+            result[rid] = "accepted"
+            continue
+        # Otherwise partial.
+        result[rid] = "partial"
+
+    return result
 
 
 # ---------------------------------------------------------------------------
