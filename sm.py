@@ -8,6 +8,7 @@ Stdlib only; Python 3.10+.
 
 from __future__ import annotations
 
+import copy as _copy
 import datetime as _dt
 import json
 import uuid
@@ -18,10 +19,21 @@ LOG_PATH: Path = Path(__file__).resolve().parent / "log.jsonl"
 
 _RESERVED_KEYS = ("id", "type", "timestamp")
 
+_TERMINAL_STATES = frozenset({"accepted", "rejected", "force_closed"})
+_VALID_TRANSITIONS: dict = {
+    "planned": frozenset({"in_progress", "force_closed"}),
+    "in_progress": frozenset({"in_review", "force_closed"}),
+    "in_review": frozenset({"accepted", "rejected", "force_closed"}),
+    "accepted": frozenset(),
+    "rejected": frozenset(),
+    "force_closed": frozenset(),
+}
+
 __all__ = [
     "LOG_PATH",
     "build_entry",
     "read_entries",
+    "derive_state",
 ]
 
 
@@ -150,3 +162,97 @@ def build_entry(type: str, content: dict) -> dict:
     for k, v in content.items():
         result[k] = v
     return result
+
+
+def derive_state() -> dict:
+    """Replay the full event log and return the derived current state.
+
+    Pure read: log bytes are not modified, no sidecar files written. Two
+    consecutive calls produce equal (and independent) results.
+
+    Returns a dict with five top-level keys:
+      - active_iteration: dict {iteration_id, requirements: [...]} or None
+      - story_backlog:    list[dict] of story records, ordered by `sequence`
+      - sprint_cut:       int or None (latest sprint_cut entry wins)
+      - story_states:     dict {story_id: state} where state is one of
+                          {planned, in_progress, in_review, accepted,
+                           rejected, force_closed}
+      - close_status:     dict {closed_by, reason, accepted_count,
+                          rejected_count, force_closed_count} or None
+                          (cleared to None on a new iteration_open)
+
+    Raises ValueError naming the offending entry id when:
+      - a state_change targets an unknown story_id
+      - a state_change is an illegal lifecycle transition
+      - a second iteration_open lands with no intervening iteration_close
+
+    Unknown entry types are no-ops (forward-compatibility).
+    """
+    state: dict = {
+        "active_iteration": None,
+        "story_backlog": [],
+        "sprint_cut": None,
+        "story_states": {},
+        "close_status": None,
+    }
+
+    for entry in read_entries():
+        etype = entry.get("type")
+        eid = entry.get("id")
+
+        if etype == "iteration_open":
+            if state["active_iteration"] is not None:
+                raise ValueError(
+                    f"iteration_open while another iteration is already "
+                    f"open (entry id {eid!r})"
+                )
+            state["active_iteration"] = {
+                "iteration_id": entry.get("iteration_id"),
+                "requirements": list(entry.get("requirements", [])),
+            }
+            state["close_status"] = None  # clear on new open
+
+        elif etype == "iteration_close":
+            state["active_iteration"] = None
+            state["close_status"] = {
+                "closed_by": entry.get("closed_by"),
+                "reason": entry.get("reason"),
+                "accepted_count": entry.get("accepted_count", 0),
+                "rejected_count": entry.get("rejected_count", 0),
+                "force_closed_count": entry.get("force_closed_count", 0),
+            }
+
+        elif etype == "story_decomposed":
+            stories = entry.get("stories", [])
+            new_backlog = sorted(
+                (_copy.deepcopy(s) for s in stories),
+                key=lambda s: s["sequence"],
+            )
+            state["story_backlog"] = new_backlog
+            state["story_states"] = {
+                s["story_id"]: "planned" for s in new_backlog
+            }
+
+        elif etype == "sprint_cut":
+            state["sprint_cut"] = entry.get("cut_position")
+
+        elif etype == "story_state_change":
+            sid = entry.get("story_id")
+            to_state = entry.get("to_state")
+            if sid not in state["story_states"]:
+                raise ValueError(
+                    f"story_state_change for unknown story_id {sid!r} "
+                    f"(entry id {eid!r})"
+                )
+            current = state["story_states"][sid]
+            allowed = _VALID_TRANSITIONS.get(current, frozenset())
+            if to_state not in allowed:
+                raise ValueError(
+                    f"illegal story state transition from {current!r} to "
+                    f"{to_state!r} for story {sid!r} (entry id {eid!r})"
+                )
+            state["story_states"][sid] = to_state
+
+        # Unknown entry types: no-op (forward-compat).
+
+    return state
