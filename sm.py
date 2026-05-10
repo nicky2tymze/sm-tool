@@ -34,6 +34,7 @@ __all__ = [
     "build_entry",
     "read_entries",
     "derive_state",
+    "ingest",
 ]
 
 
@@ -256,3 +257,146 @@ def derive_state() -> dict:
         # Unknown entry types: no-op (forward-compat).
 
     return state
+
+
+def ingest(path) -> dict:
+    """Ingest a PO Tool iteration-open handoff JSON file at `path`.
+
+    Reads + validates the handoff, then writes a single `iteration_open`
+    log entry via the canonical `build_entry` + `_append_entry` path.
+    Returns the appended entry dict.
+
+    Validation failures raise `ValueError` (with no log write). Filesystem
+    errors are stdlib-canonical: missing path → `FileNotFoundError`,
+    directory path → `IsADirectoryError`.
+
+    Accepts either `str` or `pathlib.Path`. Failure invariant: log.jsonl
+    is byte-for-byte unchanged on any validation/parse/IO failure.
+    """
+    p = Path(path)
+
+    # --- Filesystem checks (stdlib-canonical errors) ---
+    if not p.exists():
+        raise FileNotFoundError(f"handoff file not found: {p!s}")
+    if p.is_dir():
+        raise IsADirectoryError(f"handoff path is a directory: {p!s}")
+
+    # --- Read + parse JSON ---
+    raw = p.read_text(encoding="utf-8")
+    try:
+        handoff = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise ValueError(
+            f"handoff file is not valid JSON: {e.msg}"
+        ) from e
+
+    # --- Top-level shape ---
+    if not isinstance(handoff, dict):
+        raise ValueError(
+            f"handoff top-level must be a JSON object, got "
+            f"{handoff.__class__.__name__}"
+        )
+
+    # iteration_id
+    if "iteration_id" not in handoff:
+        raise ValueError("handoff missing required field 'iteration_id'")
+    iter_id = handoff["iteration_id"]
+    if not isinstance(iter_id, str) or not iter_id.strip():
+        raise ValueError(
+            "handoff 'iteration_id' must be a non-empty string"
+        )
+
+    # requirements
+    if "requirements" not in handoff:
+        raise ValueError("handoff missing required field 'requirements'")
+    reqs = handoff["requirements"]
+    if not isinstance(reqs, list):
+        raise ValueError(
+            f"handoff 'requirements' must be a list, got "
+            f"{reqs.__class__.__name__}"
+        )
+    if len(reqs) == 0:
+        raise ValueError("handoff 'requirements' must not be empty")
+
+    # Per-requirement validation + duplicate-id check
+    seen_ids: dict = {}
+    for i, req in enumerate(reqs):
+        if not isinstance(req, dict):
+            raise ValueError(
+                f"handoff 'requirements'[{i}] must be a dict, got "
+                f"{req.__class__.__name__}"
+            )
+        if "requirement_id" not in req:
+            raise ValueError(
+                f"handoff 'requirements'[{i}] missing required field "
+                f"'requirement_id'"
+            )
+        rid = req["requirement_id"]
+        if not isinstance(rid, str) or not rid.strip():
+            raise ValueError(
+                f"handoff 'requirements'[{i}] 'requirement_id' must be a "
+                f"non-empty string"
+            )
+        if rid in seen_ids:
+            raise ValueError(
+                f"handoff 'requirements' contains duplicate "
+                f"requirement_id {rid!r}"
+            )
+        seen_ids[rid] = i
+
+    # --- Single-active-iteration enforcement (via derive_state) ---
+    state = derive_state()
+    if state["active_iteration"] is not None:
+        open_id = state["active_iteration"]["iteration_id"]
+        raise ValueError(
+            f"cannot ingest: iteration {open_id!r} is already open"
+        )
+
+    # --- All validation passed; build + append ---
+    entry = build_entry("iteration_open", handoff)
+    _append_entry(entry)
+    return entry
+
+
+# ---------------------------------------------------------------------------
+# CLI surface — `python -m sm <command> <args...>`
+# ---------------------------------------------------------------------------
+
+def _cli_main(argv: list) -> int:
+    """Dispatch CLI subcommands. Returns the exit code."""
+    import os
+    import sys as _sys
+
+    if len(argv) < 1:
+        print("usage: python -m sm <command> [args...]", file=_sys.stderr)
+        return 1
+
+    cmd = argv[0]
+    if cmd == "ingest":
+        if len(argv) != 2:
+            print("usage: python -m sm ingest <path>", file=_sys.stderr)
+            return 1
+
+        # Honor SM_LOG_PATH env var if set, so subprocess CLI tests stay
+        # hermetic and the package's real log isn't touched.
+        env_log = os.environ.get("SM_LOG_PATH")
+        if env_log:
+            global LOG_PATH
+            LOG_PATH = Path(env_log)
+
+        try:
+            entry = ingest(argv[1])
+        except Exception as e:  # noqa: BLE001 — surface any error to stderr
+            print(f"error: {e}", file=_sys.stderr)
+            return 1
+
+        print(entry["iteration_id"])
+        return 0
+
+    print(f"unknown command: {cmd!r}", file=_sys.stderr)
+    return 1
+
+
+if __name__ == "__main__":
+    import sys as _sys
+    _sys.exit(_cli_main(_sys.argv[1:]))
