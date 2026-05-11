@@ -22,7 +22,6 @@ LOG_PATH: Path = Path(__file__).resolve().parent / "log.jsonl"
 
 _RESERVED_KEYS = ("id", "type", "timestamp")
 
-_TERMINAL_STATES = frozenset({"accepted", "rejected", "force_closed"})
 _VALID_TRANSITIONS: dict = {
     "planned": frozenset({"in_progress", "force_closed"}),
     "in_progress": frozenset({"in_review", "force_closed"}),
@@ -30,6 +29,16 @@ _VALID_TRANSITIONS: dict = {
     "accepted": frozenset(),
     "rejected": frozenset(),
     "force_closed": frozenset(),
+}
+
+# Story 14 — per-story lifecycle CLI subcommand → target state mapping.
+# Hoisted to module scope so it is built once at import (not per
+# `_cli_main` invocation).
+_LIFECYCLE_TARGETS = {
+    "start": "in_progress",
+    "submit": "in_review",
+    "accept": "accepted",
+    "reject": "rejected",
 }
 
 __all__ = [
@@ -2155,7 +2164,7 @@ def aggregate_requirements(state: dict) -> dict:
     # --- Collect declared requirement_ids in iteration-declared order ---
     declared_reqs = []
     seen = set()
-    for r in active.get("requirements", []) or []:
+    for r in active.get("requirements", []):
         if not isinstance(r, dict):
             continue
         rid = r.get("requirement_id")
@@ -2164,15 +2173,15 @@ def aggregate_requirements(state: dict) -> dict:
         declared_reqs.append(rid)
         seen.add(rid)
 
-    backlog = state.get("story_backlog", []) or []
-    story_states = state.get("story_states", {}) or {}
+    backlog = state.get("story_backlog", [])
+    story_states = state.get("story_states", {})
 
     # --- Build req_id -> list of story lifecycle states. Multi-requirement
     # stories contribute to every requirement they roll up to.
     req_to_states: dict = {rid: [] for rid in declared_reqs}
     for s in backlog:
         sid = s.get("story_id")
-        rids = s.get("requirement_ids", []) or []
+        rids = s.get("requirement_ids", [])
         lifecycle = story_states.get(sid, "planned")
         for rid in rids:
             # Only count contributions to declared requirements. Stories
@@ -2313,7 +2322,7 @@ def close_iteration(
     non_terminal = []
     for sid in in_sprint_ids:
         cur = story_states.get(sid, "planned")
-        if cur not in _TERMINAL_STATES:
+        if cur not in {"accepted", "rejected", "force_closed"}:
             non_terminal.append((sid, cur))
 
     if non_terminal:
@@ -2533,7 +2542,7 @@ def force_close(reason: str) -> dict:
     non_terminal: list = []
     for sid in in_sprint_ids:
         cur = story_states.get(sid, "planned")
-        if cur not in _TERMINAL_STATES:
+        if cur not in {"accepted", "rejected", "force_closed"}:
             non_terminal.append((sid, cur))
 
     # --- Transition each non-terminal story to force_closed. After this
@@ -2805,12 +2814,7 @@ def execute(
         # whitespace text we fall back to a synthetic placeholder so the
         # audit trail stays honest about the reviewer's verdict.
         if test_result_str.strip():
-            try:
-                record_review(story_id, False, test_result_str)
-            except Exception:
-                # Defense in depth: don't block rejection on the
-                # reviewer_approval write failing.
-                pass
+            record_review(story_id, False, test_result_str)
         else:
             placeholder = build_entry(
                 "reviewer_approval",
@@ -3018,13 +3022,7 @@ def _cli_main(argv: list) -> int:
     # Each routes to `transition_story(story_id, <target>)` with a fixed
     # target state. The four are isomorphic: same shape of arg validation,
     # same exception → exit code mapping, same success/failure surface.
-    _LIFECYCLE_TARGETS = {
-        "start": "in_progress",
-        "submit": "in_review",
-        "accept": "accepted",
-        "reject": "rejected",
-    }
-
+    # `_LIFECYCLE_TARGETS` is defined at module scope (top of sm.py).
     if cmd in _LIFECYCLE_TARGETS:
         target_state = _LIFECYCLE_TARGETS[cmd]
 
