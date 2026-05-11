@@ -1,0 +1,13 @@
+{
+  "iteration_id": "cardiff-smoke-001",
+  "iteration_goal": "Smoke-prove sm-tool runs end-to-end against real Anthropic API.",
+  "requirements": [
+    {
+      "requirement_id": "req-1",
+      "title": "Add greet function",
+      "description": "Add a function greet(name) that returns 'Hello, <name>!' to a new utils.py module.",
+      "priority": "MUST",
+      "acceptance_criteria": "greet('Cardiff') returns the string 'Hello, Cardiff!'"
+    }
+  ]
+}
