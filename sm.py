@@ -89,6 +89,9 @@ __all__ = [
     "ConfigError",
     "resolve_context_mode",
     "assemble_spawn_context",
+    "count_input_tokens",
+    "TokenBudgetExceeded",
+    "resolve_token_budget",
 ]
 
 
@@ -463,6 +466,14 @@ _HAIKU_4_5_MODEL: str = "claude-haiku-4-5-20251001"
 # of the four per-spawn SM_*_MAX_TOKENS env vars.
 _DEFAULT_MAX_TOKENS: int = 4096
 
+# Iter 3 v2 Sprint 1 Story 3 — default input-token budget for the
+# pre-spawn guard. Claude 3.5 / Haiku 4.5 input windows comfortably
+# exceed this number, leaving headroom for the assistant response inside
+# the SDK's combined budget. Operator overrides via SM_TOKEN_BUDGET
+# (single global cap; no per-spawn override). Private (leading
+# underscore), NOT in __all__.
+_DEFAULT_TOKEN_BUDGET: int = 100_000
+
 # Per-spawn env var names keyed by canonical role. The four roles match
 # the spawn-agent surface (decompose / test_writer / coder / reviewer).
 _ROLE_MODEL_ENV: dict = {
@@ -793,6 +804,123 @@ def _format_context_for_message(context: dict) -> str:
         )
 
     return "\n\n".join(sections)
+
+
+# ---------------------------------------------------------------------------
+# Iter 3 v2 Sprint 1 Story 3 — pre-spawn token-budget guard.
+#
+# `count_input_tokens(messages)` is a deterministic stdlib-only estimate
+# of input tokens for a list of message dicts shaped like the SDK's
+# `messages.create(messages=...)` argument. The heuristic — `len(content)
+# // 4` summed across messages — is the Anthropic-documented "4
+# characters per token" rule of thumb. It is intentionally character-
+# based (Python `len(str)`), NOT byte-based, so the count is stable
+# across multibyte glyphs.
+#
+# `TokenBudgetExceeded` is the typed exception each of the four spawn
+# defaults raises when the assembled message exceeds the configured
+# budget. It subclasses ValueError so existing `except ValueError`
+# callers keep working, and carries `.limit` and `.actual` attributes
+# so the operator can correlate the raise with `SM_TOKEN_BUDGET`.
+#
+# `resolve_token_budget()` mirrors `resolve_max_tokens`'s parse / error
+# handling shape — empty / whitespace falls through to
+# `_DEFAULT_TOKEN_BUDGET`, invalid integer raises `ConfigError`,
+# negative budgets are rejected, zero is allowed (operator's call —
+# every spawn will then trip the guard).
+#
+# The guard fires AFTER message assembly + BEFORE the `_invoke_anthropic`
+# call inside each of the four spawn defaults. `TokenBudgetExceeded`
+# propagates UNWRAPPED — it must NOT be caught by the per-spawn except
+# chains that wrap as `DecomposeAgentError` / `TestWriterAgentError` /
+# `CoderAgentError` / `ReviewerAgentError`. Matches the propagation
+# policy used for `MissingAPIKeyError` and `ConfigError`.
+# ---------------------------------------------------------------------------
+
+def count_input_tokens(messages: list) -> int:
+    """Estimate input tokens for a list of SDK-shaped message dicts.
+
+    Uses the Anthropic-documented "4 characters per token" heuristic:
+    `len(content) // 4` summed across messages. Deterministic, stdlib-
+    only, no SDK round-trip — keeps the no-network posture intact.
+
+    Counts CHARACTERS (Python `len(str)`), NOT bytes. A multibyte glyph
+    contributes 1 character regardless of UTF-8 width — this matches the
+    SDK's tokenizer behavior closer than a byte count would.
+
+    Args:
+        messages: A list of message dicts in the shape used by
+            `_invoke_anthropic` (`[{"role": "user", "content": "..."}]`).
+            An empty list returns 0; empty content strings contribute 0.
+
+    Returns:
+        The summed token estimate as a non-negative `int`.
+    """
+    return sum(len(m["content"]) // 4 for m in messages)
+
+
+class TokenBudgetExceeded(ValueError):
+    """Raised when the assembled spawn message exceeds the input-token
+    budget configured by `SM_TOKEN_BUDGET` (or its default).
+
+    Subclasses ValueError so existing `except ValueError` handlers keep
+    working; distinct class identity lets the four spawn defaults
+    propagate it UNCHANGED (never wrapped as the per-spawn
+    `*AgentError`). Matches the propagation policy used for
+    `MissingAPIKeyError` and `ConfigError`.
+
+    Attributes:
+        limit: The configured budget that was exceeded.
+        actual: The estimated token count that triggered the raise.
+    """
+
+    def __init__(self, limit: int, actual: int):
+        super().__init__(
+            f"input token budget exceeded: limit={limit}, actual={actual}"
+        )
+        self.limit = limit
+        self.actual = actual
+
+
+def resolve_token_budget() -> int:
+    """Return the input-token budget for spawn-message assembly.
+
+    Reads `SM_TOKEN_BUDGET`. Empty / whitespace-only / unset falls
+    through to `_DEFAULT_TOKEN_BUDGET` (100000). Non-empty values that
+    fail to parse as a non-negative integer raise `ConfigError` (a
+    ValueError subclass) naming both the env var and its value.
+    Negative budgets are rejected; zero is allowed (operator's call —
+    every spawn will then trip the guard).
+
+    Single global cap — no per-spawn override (the four spawns share
+    the same budget).
+
+    Returns:
+        The resolved budget as an `int`.
+
+    Raises:
+        ConfigError: A non-empty env-var value could not be parsed as a
+            non-negative integer.
+    """
+    import os as _os  # local import keeps the resolver stdlib-only
+
+    raw = _os.environ.get("SM_TOKEN_BUDGET", "")
+    stripped = raw.strip() if raw else ""
+    if not stripped:
+        return _DEFAULT_TOKEN_BUDGET
+    try:
+        n = int(stripped)
+    except ValueError:
+        raise ConfigError(
+            f"SM_TOKEN_BUDGET={raw!r} is not a valid integer; "
+            f"SM_TOKEN_BUDGET must be a non-negative integer"
+        ) from None
+    if n < 0:
+        raise ConfigError(
+            f"SM_TOKEN_BUDGET={raw!r} is negative; SM_TOKEN_BUDGET "
+            f"must be a non-negative integer"
+        )
+    return n
 
 
 # Story 13 graph — exposes only the operator-driven transitions. The
@@ -1488,6 +1616,15 @@ def _default_decompose_spawn(
     )
     messages = [{"role": "user", "content": user_content}]
 
+    # Iter 3 v2 Sprint 1 Story 3 — pre-spawn token-budget guard. Placed
+    # OUTSIDE the try/except so TokenBudgetExceeded propagates UNWRAPPED
+    # (never wrapped as DecomposeAgentError). Matches the propagation
+    # policy used for MissingAPIKeyError and ConfigError.
+    budget = resolve_token_budget()
+    actual = count_input_tokens(messages)
+    if actual > budget:
+        raise TokenBudgetExceeded(limit=budget, actual=actual)
+
     try:
         return _invoke_anthropic(messages, model, max_tokens, api_key)
     except MissingAPIKeyError:
@@ -1583,6 +1720,15 @@ def _default_execute_test_writer_spawn(
         f"Return the test code for this story per the role spec."
     )
     messages = [{"role": "user", "content": user_content}]
+
+    # Iter 3 v2 Sprint 1 Story 3 — pre-spawn token-budget guard. Placed
+    # OUTSIDE the try/except so TokenBudgetExceeded propagates UNWRAPPED
+    # (never wrapped as TestWriterAgentError). Matches the propagation
+    # policy used for MissingAPIKeyError and ConfigError.
+    budget = resolve_token_budget()
+    actual = count_input_tokens(messages)
+    if actual > budget:
+        raise TokenBudgetExceeded(limit=budget, actual=actual)
 
     try:
         return _invoke_anthropic(messages, model, max_tokens, api_key)
@@ -1685,6 +1831,15 @@ def _default_execute_coder_spawn(
         f"Return the implementation code per the role spec."
     )
     messages = [{"role": "user", "content": user_content}]
+
+    # Iter 3 v2 Sprint 1 Story 3 — pre-spawn token-budget guard. Placed
+    # OUTSIDE the try/except so TokenBudgetExceeded propagates UNWRAPPED
+    # (never wrapped as CoderAgentError). Matches the propagation
+    # policy used for MissingAPIKeyError and ConfigError.
+    budget = resolve_token_budget()
+    actual = count_input_tokens(messages)
+    if actual > budget:
+        raise TokenBudgetExceeded(limit=budget, actual=actual)
 
     try:
         return _invoke_anthropic(messages, model, max_tokens, api_key)
@@ -1810,6 +1965,15 @@ def _default_execute_reviewer_spawn(
         f"'test_result' (str) per the role spec."
     )
     messages = [{"role": "user", "content": user_content}]
+
+    # Iter 3 v2 Sprint 1 Story 3 — pre-spawn token-budget guard. Placed
+    # OUTSIDE the try/except so TokenBudgetExceeded propagates UNWRAPPED
+    # (never wrapped as ReviewerAgentError). Matches the propagation
+    # policy used for MissingAPIKeyError and ConfigError.
+    budget = resolve_token_budget()
+    actual = count_input_tokens(messages)
+    if actual > budget:
+        raise TokenBudgetExceeded(limit=budget, actual=actual)
 
     try:
         raw = _invoke_anthropic(messages, model, max_tokens, api_key)

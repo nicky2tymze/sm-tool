@@ -253,6 +253,10 @@ _ALLOWED_ENV_VAR_READS = {
     # literal `os.environ.get("SM_CONTEXT_MODE", "")` inside
     # `resolve_context_mode`. Same cascade pattern as Iter 2 Stories 2/3.
     "SM_CONTEXT_MODE",
+    # Iter 3 v2 Sprint 1 Story 3 — pre-spawn token-budget guard. Single
+    # literal `os.environ.get("SM_TOKEN_BUDGET", "")` inside
+    # `resolve_token_budget`. Same cascade pattern as Story 1.
+    "SM_TOKEN_BUDGET",
 }
 
 
