@@ -16,7 +16,11 @@ sprints delivered. v0.3.0 tagged.
   already implemented; tests lock the contracts
 
 Recorded live across two recording sessions on 2026-05-10. The
-unedited build recordings are public artifacts.
+unedited build recordings are public artifacts:
+
+- **Sprint 1 live build** (morning, 2h36): https://youtu.be/Pu2uwK4QOVs
+- **Sprint 2 + Iter 1 close live build** (afternoon, 2h20): https://youtu.be/xnnQg5Gw1lw
+- **Edited 3-minute walkthrough**: https://youtu.be/_9BOOEKaCIs
 
 See [`iter1/Sprint_1_Retro.md`](iter1/Sprint_1_Retro.md) and
 [`iter1/Iter_1_Retro.md`](iter1/Iter_1_Retro.md) for full stats
@@ -26,7 +30,7 @@ Part of a small development suite shaped on the same patterns:
 
 - [`standup-tool`](https://github.com/nicky2tymze/standup-tool) — daily-standup loop (shipped v0.1)
 - [`po-tool`](https://github.com/nicky2tymze/po-tool) — product-owner pipeline (shipped v0.2)
-- `sm-tool` — scrum-master pipeline (this repo, in build)
+- `sm-tool` — scrum-master pipeline (this repo, shipped v0.3.0)
 
 Each tool ships on the same shape: append-only JSONL log,
 content-oriented schema, close-and-flow lifecycle. SM Tool closes the
