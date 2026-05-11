@@ -66,6 +66,9 @@ __all__ = [
     "ForceCloseError",
     "execute",
     "ExecuteError",
+    "resolve_api_key",
+    "MissingAPIKeyError",
+    "EXIT_AGENT_ERROR",
 ]
 
 
@@ -250,6 +253,50 @@ class ForceCloseError(ValueError):
 
 class ExecuteError(ValueError):
     """Raised when execute pipeline cannot proceed."""
+
+
+# ---------------------------------------------------------------------------
+# Iter 2 Story 2 — typed MissingAPIKeyError. Subclasses ValueError so existing
+# `except ValueError` callers keep working. Raised by `resolve_api_key()` when
+# ANTHROPIC_API_KEY is unset, empty, or whitespace-only. The SDK is NOT
+# imported on this failure path — the resolver is a pure stdlib helper.
+# ---------------------------------------------------------------------------
+
+class MissingAPIKeyError(ValueError):
+    """Raised when ANTHROPIC_API_KEY is unset or empty.
+
+    The CLI dispatcher catches this at the top level, prints the
+    single-line message verbatim to stderr (no traceback), and exits with
+    EXIT_AGENT_ERROR (12). Subclasses ValueError so existing handlers in
+    the codebase still match.
+    """
+
+
+def resolve_api_key() -> str:
+    """Return the ANTHROPIC_API_KEY env var value, or raise MissingAPIKeyError.
+
+    Single source of truth for API-key reads across every real-agent spawn
+    path (decompose, test_writer, coder, reviewer). Reads `os.environ` on
+    every call — values are not cached, so the resolver honors mid-process
+    env mutations.
+
+    Returns the env var VERBATIM on success (no whitespace stripping — a
+    leading/trailing space is part of the value the operator chose).
+
+    Raises:
+        MissingAPIKeyError: env var is unset, empty string, or
+            whitespace-only. The message names the env var and points at
+            the remediation step (single line, no traceback when the CLI
+            handles it). The SDK is NOT imported on this path.
+    """
+    import os as _os  # local import keeps the failure path stdlib-only
+    key = _os.environ.get("ANTHROPIC_API_KEY", "")
+    if not key or not key.strip():
+        raise MissingAPIKeyError(
+            "ANTHROPIC_API_KEY is not set; export it before running this "
+            "command (see https://console.anthropic.com/ for keys)"
+        )
+    return key
 
 
 # Story 13 graph — exposes only the operator-driven transitions. The
@@ -1989,6 +2036,9 @@ EXIT_SPRINT_CUT = 8
 EXIT_TRANSITION = 9
 # Story 18 — distinct exit code for iteration-close failures.
 EXIT_CLOSE = 11
+# Iter 2 Story 2 — distinct exit code for agent-side errors (missing
+# ANTHROPIC_API_KEY, downstream SDK auth failure, etc.). LOCKED_DECISION 7.
+EXIT_AGENT_ERROR = 12
 
 
 _HELP_TEXT = """\
@@ -2037,8 +2087,20 @@ def _cli_main(argv: list) -> int:
         if env_log:
             LOG_PATH = Path(env_log)
 
+        # Iter 2 Story 2 — gate the default real-agent path on a resolved
+        # API key. Failure here exits 12 (EXIT_AGENT_ERROR), prints the
+        # actionable message verbatim to stderr, and never imports the SDK.
+        try:
+            resolve_api_key()
+        except MissingAPIKeyError as e:
+            print(str(e), file=_sys.stderr)
+            return EXIT_AGENT_ERROR
+
         try:
             entry = decompose()
+        except MissingAPIKeyError as e:
+            print(str(e), file=_sys.stderr)
+            return EXIT_AGENT_ERROR
         except NotImplementedError as e:
             print(f"error: {e}", file=_sys.stderr)
             return EXIT_OTHER

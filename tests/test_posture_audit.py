@@ -228,13 +228,30 @@ def _env_keys_read(src: str) -> set[str]:
     return keys
 
 
+_ALLOWED_ENV_VAR_READS = {
+    # Story 9 — hermetic subprocess test log path. Established Iter 1.
+    "SM_LOG_PATH",
+    # Iter 2 Story 2 — single-source-of-truth resolver for the Anthropic
+    # API key. Posture evolved from "no env reads beyond SM_LOG_PATH" to
+    # "the API key joins via the explicit `resolve_api_key()` helper".
+    # Same cascade pattern Story 1 used to update the runtime-deps audit.
+    "ANTHROPIC_API_KEY",
+}
+
+
 def test_only_sm_log_path_env_var_read():
-    """Every os.environ.get / os.environ[...] / os.getenv must target
-    SM_LOG_PATH and only SM_LOG_PATH.
+    """Every os.environ.get / os.environ[...] / os.getenv must target one
+    of the explicitly allowed env vars.
+
+    Iter 1 pinned `{SM_LOG_PATH}` only; Iter 2 Story 2 expands the
+    allowlist to include `ANTHROPIC_API_KEY` (read once, inside
+    `resolve_api_key`). Any further additions require a deliberate
+    posture review — keep the allowlist tight.
     """
     keys = _env_keys_read(_source())
-    assert keys == {"SM_LOG_PATH"}, (
-        f"sm.py reads unexpected env vars: {sorted(keys - {'SM_LOG_PATH'})}"
+    assert keys == _ALLOWED_ENV_VAR_READS, (
+        f"sm.py reads unexpected env vars: "
+        f"{sorted(keys - _ALLOWED_ENV_VAR_READS)}"
     )
 
 
