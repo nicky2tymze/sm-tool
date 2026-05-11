@@ -370,26 +370,43 @@ def test_no_pip_or_setuptools_runtime_use():
     assert not _has_import(src, "pkg_resources")
 
 
-def test_pyproject_declares_no_runtime_dependencies():
-    """Belt-and-suspenders: pyproject.toml must not declare runtime deps.
-    The audit above is on import statements; this checks the package metadata.
+_ALLOWED_RUNTIME_DEPS = frozenset({"anthropic"})
+
+
+def test_pyproject_declares_only_allowed_runtime_dependencies():
+    """Iter 2 retires the strict stdlib-only posture and explicitly allows
+    the `anthropic` SDK as a runtime dep (Iter 2 Story 1). The audit still
+    rejects any OTHER runtime dependency — only the explicit allowlist
+    above is permitted. Iter 1's broader stdlib-only invariant is now
+    scoped to the Python standard library + `anthropic`.
     """
     pyproject = PACKAGE_DIR / "pyproject.toml"
     assert pyproject.is_file()
     text = pyproject.read_text(encoding="utf-8")
-    # A `dependencies = [...]` line with anything inside it is a posture
-    # violation. An empty list (`dependencies = []`) is fine but currently
-    # absent — neither form should declare deps.
     m = re.search(
         r"^\s*dependencies\s*=\s*\[([^\]]*)\]",
         text,
         re.MULTILINE,
     )
-    if m is not None:
-        inside = m.group(1).strip()
-        # Allow only an empty list or pure whitespace/comments.
-        non_comment = re.sub(r"#[^\n]*", "", inside).strip().strip(",")
-        assert non_comment == "", (
-            f"pyproject.toml declares runtime dependencies "
-            f"({inside!r}); sm-tool must remain stdlib-only"
+    if m is None:
+        # No dependencies block at all — fine (no deps to audit).
+        return
+    inside = m.group(1).strip()
+    # Strip comments and split on commas; each entry should be a quoted
+    # string naming a package, optionally with version/extras spec.
+    non_comment = re.sub(r"#[^\n]*", "", inside)
+    raw_entries = [e.strip().strip(",").strip() for e in non_comment.split(",")]
+    entries = [e for e in raw_entries if e]
+    for entry in entries:
+        # Strip the surrounding quotes and any version/extras spec to get
+        # the bare package name.
+        unquoted = entry.strip("'\"")
+        # Bare package name is everything before the first comparator,
+        # bracket (extras), or whitespace.
+        pkg_name = re.split(r"[<>=!~\[\s]", unquoted, maxsplit=1)[0].strip()
+        assert pkg_name in _ALLOWED_RUNTIME_DEPS, (
+            f"pyproject.toml declares runtime dependency {pkg_name!r}; "
+            f"only {sorted(_ALLOWED_RUNTIME_DEPS)} are allowed in Iter 2. "
+            f"Add to _ALLOWED_RUNTIME_DEPS only after a deliberate "
+            f"posture review."
         )
