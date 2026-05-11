@@ -255,45 +255,76 @@ def test_spawn_agent_is_optional_kwarg():
 
 
 # ===========================================================================
-# Default spawn_agent raises NotImplementedError (3+)
+# Default spawn_agent refuses to silently run without proper setup (3+)
+#
+# Iter 2 Story 6 cascade: the Iter 1 default raised NotImplementedError
+# unconditionally. With Story 6, the default IS implemented but it
+# refuses to run without an `ANTHROPIC_API_KEY` — the original intent
+# ("default refuses to silently run") is preserved; the mechanism
+# changed from NotImplementedError to MissingAPIKeyError.
 # ===========================================================================
 
 
-def test_default_spawn_agent_raises_not_implemented(isolated_log):
-    """No spawn_agent passed → NotImplementedError. Real integration is Iter 2."""
+def test_default_spawn_agent_raises_not_implemented(isolated_log, monkeypatch):
+    """No spawn_agent passed + no API key → MissingAPIKeyError.
+
+    Iter 1 historic name; under Iter 2 Story 6 the default raises
+    MissingAPIKeyError instead of NotImplementedError. Same intent:
+    the default refuses to run without the operator's explicit setup.
+    """
     import sm
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     _seed_iteration()
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(sm.MissingAPIKeyError):
         sm.decompose()
 
 
-def test_default_spawn_agent_error_mentions_iter_2(isolated_log):
-    """The NotImplementedError message points at Iter 2."""
+def test_default_spawn_agent_error_mentions_iter_2(isolated_log, monkeypatch):
+    """The default-refusal error names the missing env var so the
+    operator knows how to fix it.
+
+    Iter 1 historic name; under Iter 2 Story 6 the error is
+    MissingAPIKeyError and names `ANTHROPIC_API_KEY` (Story 2's
+    actionable-error pin), re-asserted in the cascade context.
+    """
     import sm
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     _seed_iteration()
-    with pytest.raises(NotImplementedError) as exc_info:
+    with pytest.raises(sm.MissingAPIKeyError) as exc_info:
         sm.decompose()
-    msg = str(exc_info.value).lower()
-    assert "iter 2" in msg or "iteration 2" in msg, (
-        f"NotImplementedError must mention Iter 2; got: {exc_info.value!s}"
+    assert "ANTHROPIC_API_KEY" in str(exc_info.value), (
+        f"MissingAPIKeyError must name ANTHROPIC_API_KEY; got: "
+        f"{exc_info.value!s}"
     )
 
 
-def test_default_spawn_agent_writes_no_entry(isolated_log):
-    """When the default spawn_agent raises, no log entry is written."""
+def test_default_spawn_agent_writes_no_entry(isolated_log, monkeypatch):
+    """When the default refuses to run, no log entry is written.
+
+    Iter 1 pinned NotImplementedError; under Iter 2 Story 6 the trigger
+    is MissingAPIKeyError. The log-unchanged invariant survives
+    verbatim.
+    """
     import sm
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     _seed_iteration()
     seeded = isolated_log.read_bytes()
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(sm.MissingAPIKeyError):
         sm.decompose()
     assert isolated_log.read_bytes() == seeded
 
 
-def test_explicit_none_spawn_agent_raises_not_implemented(isolated_log):
-    """Passing spawn_agent=None is the same as omitting it — uses default."""
+def test_explicit_none_spawn_agent_raises_not_implemented(
+        isolated_log, monkeypatch):
+    """Passing spawn_agent=None is the same as omitting it — uses default.
+
+    Iter 1 historic name; under Iter 2 Story 6 the default raises
+    MissingAPIKeyError when ANTHROPIC_API_KEY is unset.
+    """
     import sm
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     _seed_iteration()
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(sm.MissingAPIKeyError):
         sm.decompose(spawn_agent=None)
 
 
@@ -1151,12 +1182,19 @@ def test_log_unchanged_after_agent_exception(isolated_log):
     assert isolated_log.read_bytes() == bytes_before
 
 
-def test_log_unchanged_after_default_spawn_agent_raises(isolated_log):
-    """Default spawn_agent raises NotImplementedError → log unchanged."""
+def test_log_unchanged_after_default_spawn_agent_raises(
+        isolated_log, monkeypatch):
+    """Default spawn_agent refuses to run → log unchanged.
+
+    Iter 1 pinned NotImplementedError; under Iter 2 Story 6 the trigger
+    is MissingAPIKeyError (no ANTHROPIC_API_KEY). The log-unchanged
+    invariant survives the mechanism swap.
+    """
     import sm
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     _seed_iteration()
     bytes_before = isolated_log.read_bytes()
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(sm.MissingAPIKeyError):
         sm.decompose()
     assert isolated_log.read_bytes() == bytes_before
 

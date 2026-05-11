@@ -709,14 +709,28 @@ def resolve_role_spec(role: str) -> Path:
     # absolute so the returned Path is always absolute, even when LOG_PATH
     # is set to a relative path.
     package_dir = Path(LOG_PATH).resolve().parent
-    spec_path = (package_dir / "roles" / f"{role}.md").resolve()
+    roles_dir = package_dir / "roles"
+    spec_path = (roles_dir / f"{role}.md").resolve()
 
-    if not spec_path.is_file():
-        raise RoleSpecNotFoundError(
-            f"role-spec file for role {role!r} not found at {spec_path!s}"
-        )
+    if spec_path.is_file():
+        return spec_path
 
-    return spec_path
+    # Iter 2 Story 6 — when the LOG_PATH-anchored roles/ dir does NOT
+    # exist (CLI subprocess with SM_LOG_PATH override pointing at a
+    # temp dir that has no roles/ staged), fall back to the directory
+    # holding sm.py itself. Tests that anchor on LOG_PATH and expect
+    # RoleSpecNotFoundError stage an empty roles/ subdir (see
+    # test_resolve_role_spec.temp_roles_dir) so this fallback does NOT
+    # fire there — preserving the missing-file contract.
+    if not roles_dir.is_dir():
+        sm_anchor = Path(__file__).resolve().parent
+        fallback_path = (sm_anchor / "roles" / f"{role}.md").resolve()
+        if fallback_path.is_file():
+            return fallback_path
+
+    raise RoleSpecNotFoundError(
+        f"role-spec file for role {role!r} not found at {spec_path!s}"
+    )
 
 
 def _role_spec_hash(role: str) -> str:
@@ -889,21 +903,35 @@ def derive_state() -> dict:
         "close_status": None,
     }
 
+    # Iter 2 Story 6: track whether a story_backlog has been written
+    # for the currently-active iteration. A subsequent `iteration_open`
+    # with a story_backlog in between is treated as an implicit
+    # close-then-open cycle (the prior iteration's decomposition phase
+    # completed). Two `iteration_open` entries with NO story_backlog (or
+    # iteration_close) between them remain an invariant violation —
+    # the strict single-active contract pinned by
+    # `test_two_iteration_opens_no_close_raises` is preserved.
+    _decomposed_since_open = False
+
     for entry in read_entries():
         etype = entry.get("type")
         eid = entry.get("id")
 
         if etype == "iteration_open":
             if state["active_iteration"] is not None:
-                raise ValueError(
-                    f"iteration_open while another iteration is already "
-                    f"open (entry id {eid!r})"
-                )
+                if not _decomposed_since_open:
+                    raise ValueError(
+                        f"iteration_open while another iteration is already "
+                        f"open (entry id {eid!r})"
+                    )
+                # Implicit close: prior iteration had a story_backlog;
+                # accept the new iter_open as the active iteration.
             state["active_iteration"] = {
                 "iteration_id": entry.get("iteration_id"),
                 "requirements": list(entry.get("requirements", [])),
             }
             state["close_status"] = None  # clear on new open
+            _decomposed_since_open = False
 
         elif etype == "iteration_close":
             state["active_iteration"] = None
@@ -914,6 +942,7 @@ def derive_state() -> dict:
                 "rejected_count": entry.get("rejected_count", 0),
                 "force_closed_count": entry.get("force_closed_count", 0),
             }
+            _decomposed_since_open = False
 
         elif etype == "story_decomposed" or etype == "story_backlog":
             stories = entry.get("stories", [])
@@ -925,6 +954,10 @@ def derive_state() -> dict:
             state["story_states"] = {
                 s["story_id"]: "planned" for s in new_backlog
             }
+            # Iter 2 Story 6: mark decomposition complete for the
+            # active iteration so a subsequent iter_open can implicitly
+            # close it (see iteration_open branch above).
+            _decomposed_since_open = True
 
         elif etype == "sprint_cut":
             state["sprint_cut"] = entry.get("cut_position")
@@ -1074,16 +1107,99 @@ def ingest(path) -> dict:
     return entry
 
 
+# ---------------------------------------------------------------------------
+# Iter 2 Story 6 — real `spawn_agent` default for `decompose`.
+#
+# `_default_decompose_spawn` is the real (non-injected) spawn-agent the
+# `decompose` function falls back to when no callable is injected. It
+# composes Stories 2 (resolve_api_key), 3 (resolve_model /
+# resolve_max_tokens), and 5 (_invoke_anthropic provider seam) into a
+# single SDK call. The function matches the injectable signature pinned
+# by Iter 1 Story 9 exactly — `(role_spec_path: str,
+# requirements: list[dict]) -> str` — so swapping default <-> injected
+# is signature-transparent. PRIVATE; NOT in __all__.
+#
+# Behavior:
+#   - Resolves the API key at call time (raises MissingAPIKeyError if
+#     unset — propagates unchanged so the CLI's exit-12 mapping fires).
+#   - Resolves model + max_tokens at call time so env-var overrides
+#     are honored on every call (no caching).
+#   - Reads the role-spec file the caller resolved and packages its
+#     content + the requirements list into a single user-role message.
+#   - Calls `_invoke_anthropic(...)` (the provider seam — the ONLY SDK
+#     import site in this module).
+#   - Returns the seam's response string AS-IS for the caller to route
+#     through `parse_agent_json`.
+#   - SDK exceptions wrap as `DecomposeAgentError` with the original
+#     chained via `__cause__`. MissingAPIKeyError propagates unchanged.
+# ---------------------------------------------------------------------------
+
+def _default_decompose_spawn(
+    role_spec_path: str,
+    requirements: list,
+) -> str:
+    """Default spawn_agent for `decompose` — calls the real Anthropic SDK.
+
+    Composes Story 2 (resolve_api_key) + Story 3 (resolve_model,
+    resolve_max_tokens) + role-spec file read + Story 5
+    (_invoke_anthropic) into one SDK round-trip. SDK exceptions wrap as
+    `DecomposeAgentError` with `__cause__` chained; MissingAPIKeyError
+    propagates unchanged so the CLI maps it to exit 12.
+
+    Signature matches the injectable contract pinned by Iter 1 Story 9.
+    """
+    # Resolve at call time so env-var overrides are honored every call.
+    api_key = resolve_api_key()  # raises MissingAPIKeyError if unset
+    model = resolve_model("decompose")
+    max_tokens = resolve_max_tokens("decompose")
+
+    # Read the role-spec file the caller already resolved. Any OS error
+    # (FileNotFoundError, PermissionError) propagates verbatim — the
+    # caller decides whether to wrap. The Story 6 spec leaves this to
+    # the Coder's discretion; raw-OS-error propagation is the simpler
+    # and more debuggable contract for an operational misconfiguration.
+    role_spec_text = Path(role_spec_path).read_text(encoding="utf-8")
+
+    # Single user-role message bundling role-spec + requirements (as
+    # JSON). Story 6 leaves exact framing to the Coder; tests pin that
+    # both pieces appear in the message content.
+    user_content = (
+        f"{role_spec_text}\n\n"
+        f"## Active iteration requirements\n\n"
+        f"{json.dumps(requirements, indent=2)}\n\n"
+        f"Return your story decomposition as a JSON object per the "
+        f"role spec."
+    )
+    messages = [{"role": "user", "content": user_content}]
+
+    try:
+        return _invoke_anthropic(messages, model, max_tokens, api_key)
+    except MissingAPIKeyError:
+        # Should not fire here (resolver already ran), but if a downstream
+        # path raises it, propagate unchanged so the CLI's exit-12
+        # mapping covers it.
+        raise
+    except DecomposeAgentError:
+        # Already typed for the caller — pass through.
+        raise
+    except Exception as e:
+        raise DecomposeAgentError(
+            f"decompose agent SDK call failed: {e}"
+        ) from e
+
+
 def decompose(spawn_agent: Optional[Callable] = None) -> dict:
     """Spawn an SM Agent (or an injected stub) to decompose the active
     iteration's requirements into a sequence of stories, then write a single
     `story_backlog` log entry on success.
 
-    Story 9 contract:
+    Iter 2 Story 6 contract (supersedes Iter 1 Story 9's NotImplementedError
+    default):
 
       - `spawn_agent` defaults to `None`; passing `None` (explicit or
-        implicit) raises `NotImplementedError` mentioning Iter 2.
-        Operators / tests inject a callable to drive the function in Iter 1.
+        implicit) routes to the real `_default_decompose_spawn` which
+        calls the Anthropic SDK via the Story 5 provider seam. Operators
+        / tests may still inject a callable to bypass the SDK entirely.
 
       - Reads the active iteration via `derive_state()`. No active
         iteration → `ValueError("no active iteration; ingest a handoff
@@ -1107,10 +1223,11 @@ def decompose(spawn_agent: Optional[Callable] = None) -> dict:
         `build_entry` + `_append_entry`. Returns the entry dict.
     """
     if spawn_agent is None:
-        raise NotImplementedError(
-            "real agent integration ships in Iter 2 — pass spawn_agent= "
-            "for testing/manual ops"
-        )
+        # Iter 2 Story 6: fall back to the real default. Bind from the
+        # module so monkeypatches in tests (`monkeypatch.setattr(sm,
+        # "_default_decompose_spawn", ...)`) take effect.
+        import sys as _sys
+        spawn_agent = _sys.modules[__name__]._default_decompose_spawn
 
     state = derive_state()
     if state["active_iteration"] is None:
