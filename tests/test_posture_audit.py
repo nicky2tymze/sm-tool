@@ -236,6 +236,19 @@ _ALLOWED_ENV_VAR_READS = {
     # "the API key joins via the explicit `resolve_api_key()` helper".
     # Same cascade pattern Story 1 used to update the runtime-deps audit.
     "ANTHROPIC_API_KEY",
+    # Iter 2 Story 3 — model and max_tokens resolution with precedence.
+    # The two globals are read as string literals inside `resolve_model`
+    # and `resolve_max_tokens` (one literal `os.environ.get` call each).
+    # The eight per-spawn env vars (SM_DECOMPOSE_MODEL, SM_CODER_MODEL,
+    # SM_TEST_WRITER_MODEL, SM_REVIEWER_MODEL and the matching
+    # *_MAX_TOKENS quartet) are read VIA a dict lookup
+    # (`_ROLE_MODEL_ENV[role]` / `_ROLE_MAX_TOKENS_ENV[role]`), so the
+    # literal-string env-read regex does not pick them up — only the
+    # two globals appear in this allowlist. The single-source-of-truth
+    # grep in `tests/test_resolve_model.py` pins the per-spawn names
+    # separately.
+    "SM_MODEL",
+    "SM_MAX_TOKENS",
 }
 
 

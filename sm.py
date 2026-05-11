@@ -69,6 +69,9 @@ __all__ = [
     "resolve_api_key",
     "MissingAPIKeyError",
     "EXIT_AGENT_ERROR",
+    "resolve_model",
+    "resolve_max_tokens",
+    "ConfigError",
 ]
 
 
@@ -297,6 +300,192 @@ def resolve_api_key() -> str:
             "command (see https://console.anthropic.com/ for keys)"
         )
     return key
+
+
+# ---------------------------------------------------------------------------
+# Iter 2 Story 3 — model + max_tokens resolution with precedence.
+#
+# `resolve_model(role)` returns the SDK model identifier and
+# `resolve_max_tokens(role)` returns the max_tokens cap, each with the
+# same three-level precedence chain:
+#
+#     per-spawn env var  >  global env var  >  hard-coded default
+#
+# Empty / whitespace-only env var values fall through to the next level
+# (operator typo for "unset", not a parse error). Invalid integer values
+# for any `*_MAX_TOKENS` env var raise the typed `ConfigError` BEFORE
+# any SDK call. Negative caps are rejected; zero is allowed.
+#
+# Single-source-of-truth: each model / max_tokens env var name appears
+# at most ONCE in this file (inside the matching resolver). A grep audit
+# in `tests/test_resolve_model.py` pins this; same posture as Story 2's
+# `resolve_api_key`. Stdlib only — no SDK import on this path.
+# ---------------------------------------------------------------------------
+
+# The exact Anthropic SDK identifier for Claude Haiku 4.5 (ASSUMPTION 2
+# of Iter 2 Story 3). Pinned in a single module-level constant so the
+# default-path return and the grep audit observe the same string.
+_HAIKU_4_5_MODEL: str = "claude-haiku-4-5-20251001"
+
+# Default max_tokens cap when neither per-spawn nor global env var is
+# set (Story 3 acceptance). Operator overrides via SM_MAX_TOKENS or one
+# of the four per-spawn SM_*_MAX_TOKENS env vars.
+_DEFAULT_MAX_TOKENS: int = 4096
+
+# Per-spawn env var names keyed by canonical role. The four roles match
+# the spawn-agent surface (decompose / test_writer / coder / reviewer).
+_ROLE_MODEL_ENV: dict = {
+    "decompose": "SM_DECOMPOSE_MODEL",
+    "test_writer": "SM_TEST_WRITER_MODEL",
+    "coder": "SM_CODER_MODEL",
+    "reviewer": "SM_REVIEWER_MODEL",
+}
+_ROLE_MAX_TOKENS_ENV: dict = {
+    "decompose": "SM_DECOMPOSE_MAX_TOKENS",
+    "test_writer": "SM_TEST_WRITER_MAX_TOKENS",
+    "coder": "SM_CODER_MAX_TOKENS",
+    "reviewer": "SM_REVIEWER_MAX_TOKENS",
+}
+_VALID_RESOLVER_ROLES: frozenset = frozenset(_ROLE_MODEL_ENV.keys())
+
+
+class ConfigError(ValueError):
+    """Raised when a configuration env var has an invalid value.
+
+    Currently emitted only by `resolve_max_tokens` when one of the
+    `*_MAX_TOKENS` env vars fails to parse as a non-negative integer.
+    Subclasses ValueError so existing `except ValueError` handlers keep
+    working; distinct class identity lets callers branch on
+    `except ConfigError` for env-var-specific recovery.
+    """
+
+
+def _validate_resolver_role(role) -> None:
+    """Shared role-arg validator for both resolvers.
+
+    Non-string roles raise TypeError naming the bad class. Unknown role
+    strings (including empty / whitespace-only) raise ValueError naming
+    the valid role set so the operator can correct the call site.
+    """
+    if not isinstance(role, str):
+        raise TypeError(
+            f"role must be a string, got {role.__class__.__name__}"
+        )
+    if role not in _VALID_RESOLVER_ROLES:
+        raise ValueError(
+            f"unknown role {role!r}; valid roles are "
+            f"{sorted(_VALID_RESOLVER_ROLES)!r}"
+        )
+
+
+def resolve_model(role: str) -> str:
+    """Return the SDK model identifier for `role`, honoring precedence.
+
+    Precedence chain (first non-empty wins):
+      1. Per-spawn env var (`SM_DECOMPOSE_MODEL`, `SM_TEST_WRITER_MODEL`,
+         `SM_CODER_MODEL`, `SM_REVIEWER_MODEL`).
+      2. `SM_MODEL` global env var.
+      3. The Haiku 4.5 default constant `_HAIKU_4_5_MODEL`.
+
+    Empty-string and whitespace-only values are treated as "unset" and
+    fall through to the next level (operator typo for "not set", not a
+    parse error — there is no parse step for model strings).
+
+    Args:
+        role: One of `"decompose"`, `"test_writer"`, `"coder"`,
+            `"reviewer"`. Non-string raises TypeError; unknown string
+            raises ValueError naming the valid set.
+
+    Returns:
+        The resolved model id as a `str`. Whitespace at the edges of
+        an env-var value is stripped before return — the SDK will not
+        accept padded model ids and a leading space is always a typo.
+    """
+    import os as _os  # local import keeps the resolver stdlib-only
+    _validate_resolver_role(role)
+
+    per_spawn_raw = _os.environ.get(_ROLE_MODEL_ENV[role], "")
+    per_spawn = per_spawn_raw.strip() if per_spawn_raw else ""
+    if per_spawn:
+        return per_spawn
+
+    glob_raw = _os.environ.get("SM_MODEL", "")
+    glob = glob_raw.strip() if glob_raw else ""
+    if glob:
+        return glob
+
+    return _HAIKU_4_5_MODEL
+
+
+def resolve_max_tokens(role: str) -> int:
+    """Return the max_tokens cap for `role`, honoring precedence.
+
+    Precedence chain (first non-empty wins):
+      1. Per-spawn env var (`SM_DECOMPOSE_MAX_TOKENS`,
+         `SM_TEST_WRITER_MAX_TOKENS`, `SM_CODER_MAX_TOKENS`,
+         `SM_REVIEWER_MAX_TOKENS`).
+      2. `SM_MAX_TOKENS` global env var.
+      3. The default constant `_DEFAULT_MAX_TOKENS` (4096).
+
+    Empty-string and whitespace-only values fall through to the next
+    level (treated as "unset"). NON-empty values that fail to parse as
+    a non-negative integer raise `ConfigError` (a ValueError subclass)
+    naming both the offending env var and its value — the operator
+    needs to know exactly which env var to fix. Negative values are
+    rejected; zero is allowed (operator's call).
+
+    Invalid per-spawn values do NOT silently fall through to the global
+    env var or the default: invalid means invalid.
+
+    Args:
+        role: One of `"decompose"`, `"test_writer"`, `"coder"`,
+            `"reviewer"`. Non-string raises TypeError; unknown string
+            raises ValueError naming the valid set.
+
+    Returns:
+        The resolved cap as an `int`.
+
+    Raises:
+        ConfigError: A non-empty env-var value could not be parsed as a
+            non-negative integer.
+        TypeError / ValueError: Invalid `role` (delegated to
+            `_validate_resolver_role`).
+    """
+    import os as _os  # local import keeps the resolver stdlib-only
+    _validate_resolver_role(role)
+
+    def _parse(env_name: str, raw: str) -> int:
+        # `int(raw)` accepts ints in any case (e.g. "0x10" not — int()
+        # without base rejects hex literals), and rejects float-strings
+        # ("42.5"), mixed alphanumeric ("123abc"), and pure alphabetic
+        # ("abc"). Catch ValueError specifically; ConfigError subclasses
+        # ValueError so we re-raise as the typed error.
+        try:
+            n = int(raw)
+        except ValueError:
+            raise ConfigError(
+                f"{env_name}={raw!r} is not a valid integer; "
+                f"max_tokens env vars must be non-negative integers"
+            ) from None
+        if n < 0:
+            raise ConfigError(
+                f"{env_name}={raw!r} is negative; max_tokens env vars "
+                f"must be non-negative integers"
+            )
+        return n
+
+    per_spawn_name = _ROLE_MAX_TOKENS_ENV[role]
+    per_spawn_raw = _os.environ.get(per_spawn_name, "")
+    per_spawn = per_spawn_raw.strip() if per_spawn_raw else ""
+    if per_spawn:
+        return _parse(per_spawn_name, per_spawn)
+
+    glob_raw = _os.environ.get("SM_MAX_TOKENS", "")
+    glob = glob_raw.strip() if glob_raw else ""
+    if glob:
+        return _parse("SM_MAX_TOKENS", glob)
+
+    return _DEFAULT_MAX_TOKENS
 
 
 # Story 13 graph — exposes only the operator-driven transitions. The
