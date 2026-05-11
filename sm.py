@@ -1188,6 +1188,88 @@ def _default_decompose_spawn(
         ) from e
 
 
+# ---------------------------------------------------------------------------
+# Iter 2 Story 7 — real `spawn_test_writer` default for `execute`.
+#
+# `_default_execute_test_writer_spawn` is the real (non-injected) spawn-
+# agent the `execute` function falls back to for the TestWriter stage when
+# no callable is injected. Mirrors Story 6's `_default_decompose_spawn`
+# shape exactly except:
+#   - signature is `(role_spec_path: str, story: dict) -> str` per Iter 1
+#     Story 23's injectable contract
+#   - role is "test_writer" (drives resolve_model / resolve_max_tokens)
+#   - user message bundles role-spec text + story dict (as JSON) + an
+#     instruction to return test code
+#   - the returned text is the SDK response VERBATIM — TestWriter returns
+#     code, not JSON, so the default does NOT route through
+#     `parse_agent_json`
+#   - SDK exceptions wrap as `TestWriterAgentError` with `__cause__`
+#     chained; MissingAPIKeyError AND ConfigError propagate UNCHANGED
+#     (operator needs the typed errors for diagnosis / exit-12 mapping)
+#
+# PRIVATE; NOT in __all__.
+# ---------------------------------------------------------------------------
+
+def _default_execute_test_writer_spawn(
+    role_spec_path: str,
+    story: dict,
+) -> str:
+    """Default spawn_test_writer for `execute` — calls the real Anthropic
+    SDK.
+
+    Composes Story 2 (resolve_api_key) + Story 3 (resolve_model,
+    resolve_max_tokens) + role-spec file read + Story 5
+    (_invoke_anthropic) into one SDK round-trip. SDK exceptions wrap as
+    `TestWriterAgentError` with `__cause__` chained; MissingAPIKeyError
+    and ConfigError propagate unchanged so the CLI maps
+    MissingAPIKeyError to exit 12 and ConfigError stays diagnosable.
+
+    Signature matches the injectable contract pinned by Iter 1 Story 23.
+    The returned string is the SDK response VERBATIM — TestWriter
+    returns code, not JSON, so no parse_agent_json call.
+    """
+    # Resolve at call time so env-var overrides are honored every call.
+    api_key = resolve_api_key()  # raises MissingAPIKeyError if unset
+    model = resolve_model("test_writer")
+    max_tokens = resolve_max_tokens("test_writer")
+
+    # Read the role-spec file the caller already resolved. Any OS error
+    # (FileNotFoundError, PermissionError) propagates verbatim — the
+    # caller decides whether to wrap. Mirrors Story 6's decision.
+    role_spec_text = Path(role_spec_path).read_text(encoding="utf-8")
+
+    # Single user-role message bundling role-spec + story dict (as JSON)
+    # + instruction to return test code. Exact framing left to the
+    # Coder; tests pin that all pieces appear in the message content.
+    user_content = (
+        f"{role_spec_text}\n\n"
+        f"## Active story\n\n"
+        f"{json.dumps(story, indent=2)}\n\n"
+        f"Return the test code for this story per the role spec."
+    )
+    messages = [{"role": "user", "content": user_content}]
+
+    try:
+        return _invoke_anthropic(messages, model, max_tokens, api_key)
+    except MissingAPIKeyError:
+        # Should not fire here (resolver already ran), but if a downstream
+        # path raises it, propagate unchanged so the CLI's exit-12
+        # mapping covers it.
+        raise
+    except ConfigError:
+        # Should not fire here either (resolvers already ran), but if a
+        # downstream path raises it, propagate unchanged so the operator
+        # gets the typed error for diagnosis.
+        raise
+    except TestWriterAgentError:
+        # Already typed for the caller — pass through.
+        raise
+    except Exception as e:
+        raise TestWriterAgentError(
+            f"test_writer agent SDK call failed: {e}"
+        ) from e
+
+
 def decompose(spawn_agent: Optional[Callable] = None) -> dict:
     """Spawn an SM Agent (or an injected stub) to decompose the active
     iteration's requirements into a sequence of stories, then write a single
@@ -2312,16 +2394,26 @@ def execute(
               place (truthful audit trail).
     """
     # --- Default-spawn check FIRST (before any type / state validation).
-    # NotImplementedError must fire regardless of state, so callers exploring
-    # the "what happens if I just call execute()" path get the right signal
-    # without leaking log entries.
-    if (spawn_test_writer is None
-            or spawn_coder is None
-            or spawn_reviewer is None):
+    # Iter 2 Story 7 inverted spawn_test_writer's default: None now routes
+    # to the real `_default_execute_test_writer_spawn` (resolved at call
+    # time via sys.modules so monkeypatches take effect). spawn_coder and
+    # spawn_reviewer remain `None`-defaults-to-NotImplementedError until
+    # Stories 8 and 9 ship. NotImplementedError must fire regardless of
+    # state, so callers exploring "what happens if I just call execute()"
+    # get the right signal without leaking log entries.
+    if spawn_coder is None or spawn_reviewer is None:
         raise NotImplementedError(
             "real agent integration ships in Iter 2 — pass "
-            "spawn_test_writer / spawn_coder / spawn_reviewer for "
-            "testing/manual ops"
+            "spawn_coder / spawn_reviewer for testing/manual ops "
+            "(coder ships in Story 8, reviewer in Story 9)"
+        )
+    if spawn_test_writer is None:
+        # Iter 2 Story 7: fall back to the real default. Bind from the
+        # module so monkeypatches in tests (`monkeypatch.setattr(sm,
+        # "_default_execute_test_writer_spawn", ...)`) take effect.
+        import sys as _sys
+        spawn_test_writer = (
+            _sys.modules[__name__]._default_execute_test_writer_spawn
         )
 
     # --- Type validation: story_id must be str (before any state read). ---
