@@ -22,9 +22,11 @@ What this file pins:
     type. Dict subclass accepted.
   - Merge order: result dict order is `id`, `type`, `timestamp`, then content
     fields in their original insertion order (Python 3.7+ dict ordering).
-  - Result independence: result is a new dict — mutating result does not
-    affect content; mutating content after the call does not affect the
-    returned result. Deep independence both directions.
+  - Result independence: result is a SHALLOW copy — the top-level dict is
+    a new object (adding/removing/overwriting top-level keys on the result
+    does not affect the input, and vice versa), but nested values are
+    shared references. Iter 2 Story 14 corrected this from an earlier
+    overclaim of "deep independence" per LOCKED_DECISION 5.
   - Round-trip: an entry built by `build_entry`, written by `_append_entry`,
     read back by `read_entries`, equals (`==`) the original built dict.
   - Schema invariant: every emitted entry has `id`, `type`, `timestamp` plus
@@ -1123,26 +1125,15 @@ def test_type_value_only_from_param():
 # ---------------------------------------------------------------------------
 # Source-of-truth invariant — every log write goes through build_entry
 # (Story 3 acceptance: "no module constructs entry dicts inline")
+#
+# NOTE: The weak structural test that lived here previously
+# (`test_no_inline_entry_construction_in_sm_module`, body =
+# `assert "def build_entry" in src`) was removed in Iter 2 Story 14.
+# It was replaced by a properly tightened AST-walking version in
+# `tests/test_retro_build_entry_honesty.py` that fails if ANY inline
+# dict literal with all three reserved keys is found outside
+# `build_entry`'s body. See Story 14 retro item 5.
 # ---------------------------------------------------------------------------
-
-def test_no_inline_entry_construction_in_sm_module():
-    """Acceptance: every code path that writes to log.jsonl routes through
-    `build_entry`. We pin the mechanism: any call to `_append_entry` in sm.py
-    that's NOT inside `build_entry` itself OR a test/private helper that
-    delegates to `build_entry` should not exist as a Story-3+ pattern.
-
-    For Story 3, the looser pin: `_append_entry` is called via
-    `build_entry`'s output path. Future stories may add public functions that
-    must use `build_entry`. We pin: `build_entry` exists and produces the
-    canonical entry shape.
-    """
-    import sm
-    sm_path = PACKAGE_DIR / "sm.py"
-    src = sm_path.read_text(encoding="utf-8")
-    # `build_entry` is defined in sm.py.
-    assert "def build_entry" in src, (
-        "build_entry must be defined as a function in sm.py"
-    )
 
 
 def test_build_entry_output_directly_acceptable_to_append_entry(isolated_log):

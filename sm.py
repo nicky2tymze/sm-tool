@@ -839,8 +839,17 @@ def build_entry(type: str, content: dict) -> dict:
         keys are not flagged). Violation raises `ValueError` naming the
         offending key.
 
-    The returned dict is a fresh object — mutating it does not affect the
-    input, and mutating the input after the call does not affect the result.
+    The returned dict is a shallow copy of `content` with the three reserved
+    keys prepended at the top level. Adding, removing, or overwriting
+    top-level keys on the returned entry does not affect the input `content`,
+    and vice versa — the two top-level dicts are separate objects. Nested
+    values are NOT recursively copied: any nested dict, list, or other
+    mutable object in `content` is shared by reference with the entry.
+    Mutating a nested value through the returned entry is observable in the
+    caller's `content` (and the reverse). Callers who need recursive
+    independence must clone `content` themselves before passing it in. Per
+    Iter 2 LOCKED_DECISION 5, no current caller relies on recursive-clone
+    semantics; the shallow-copy implementation is intentional.
     """
     # NOTE: the `type` parameter shadows the builtin inside this function.
     # Use `.__class__.__name__` to format type names in error messages —
