@@ -12,6 +12,7 @@ import copy as _copy
 import datetime as _dt
 import hashlib as _hashlib
 import json
+import re
 import uuid
 from pathlib import Path
 from typing import Callable, Iterator, Optional
@@ -194,6 +195,16 @@ _PARSE_ROLE_TO_ERROR = {
 _VALID_PARSE_ROLES = frozenset(_PARSE_ROLE_TO_ERROR.keys())
 _PARSE_SNIPPET_LIMIT = 200
 
+# Iter 2 Story 17 — strip markdown code fences (e.g. ```json\n...\n```)
+# off the outer shell before invoking `json.loads`. The live Anthropic
+# SDK occasionally wraps valid JSON in fenced code blocks; this regex
+# tolerates lowercase/uppercase/mixed-case language tags, no language
+# tag, and surrounding whitespace/newlines outside the fences.
+_FENCE_RE = re.compile(
+    r"^\s*```(?:json)?\s*\n?(.*?)\n?```\s*$",
+    re.DOTALL | re.IGNORECASE,
+)
+
 
 def parse_agent_json(raw, role):
     """Parse an agent response string and return the resulting dict or list.
@@ -233,9 +244,23 @@ def parse_agent_json(raw, role):
         )
 
     err_class = _PARSE_ROLE_TO_ERROR[role]
+
+    # Iter 2 Story 17 — strip markdown code fences off the outer shell.
+    # Fenceless inputs fall through to the original `raw` bytes (no
+    # behavior change for the Story 4 contract).
+    stripped = raw.strip()
+    m = _FENCE_RE.match(stripped)
+    if m:
+        candidate = m.group(1)
+    else:
+        candidate = raw
+
     try:
-        return json.loads(raw)
+        return json.loads(candidate)
     except json.JSONDecodeError as e:
+        # Snippet from the ORIGINAL raw so debug output shows what the
+        # agent actually returned (fences included), not the post-strip
+        # candidate.
         snippet = raw[:_PARSE_SNIPPET_LIMIT]
         raise err_class(
             f"{role} agent returned unparseable JSON: {e}; "

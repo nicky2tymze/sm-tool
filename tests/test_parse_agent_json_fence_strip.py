@@ -479,13 +479,13 @@ def test_decompose_succeeds_with_fenced_agent_output(
         return fenced_output
 
     entry = sm_module.decompose(spawn_agent=_stub_spawn)
-    assert entry["entry_type"] == "story_backlog", (
-        f"expected entry_type='story_backlog'; got "
-        f"{entry.get('entry_type')!r}"
+    assert entry["type"] == "story_backlog", (
+        f"expected type='story_backlog'; got "
+        f"{entry.get('type')!r}"
     )
-    assert len(entry["payload"]["stories"]) == 2, (
+    assert len(entry["stories"]) == 2, (
         f"expected 2 stories landed on the entry; got "
-        f"{len(entry['payload']['stories'])}"
+        f"{len(entry['stories'])}"
     )
 
 
@@ -540,11 +540,11 @@ def test_decompose_succeeds_with_fenced_output_no_language_tag(
         return fenced_output
 
     entry = sm_module.decompose(spawn_agent=_stub_spawn)
-    assert entry["entry_type"] == "story_backlog", (
-        f"expected entry_type='story_backlog' from bare-fence output; "
-        f"got {entry.get('entry_type')!r}"
+    assert entry["type"] == "story_backlog", (
+        f"expected type='story_backlog' from bare-fence output; "
+        f"got {entry.get('type')!r}"
     )
-    assert len(entry["payload"]["stories"]) == 1, (
+    assert len(entry["stories"]) == 1, (
         f"expected 1 story landed; got "
-        f"{len(entry['payload']['stories'])}"
+        f"{len(entry['stories'])}"
     )
