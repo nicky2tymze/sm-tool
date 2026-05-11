@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import copy as _copy
 import datetime as _dt
+import difflib as _difflib
 import hashlib as _hashlib
 import json
 import os as _os
@@ -1377,6 +1378,53 @@ _PATH_HINT_CHARS_RE = re.compile(r"^[A-Za-z0-9_./-]+$")
 _STORY_SHORT_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
+def _atomic_write_bytes(path: Path, data: bytes) -> None:
+    """Atomically write ``data`` to ``path`` via tempfile + os.replace.
+
+    Used by both the greenfield and collision paths of
+    ``write_agent_output``. Writes to a sibling tempfile, then renames.
+    On any failure (write or replace) the tempfile is unlinked so no
+    ``.part`` / ``.sm_write_`` litter survives. Existing files at
+    ``path`` are overwritten by the rename (POSIX ``os.replace`` semantics);
+    callers gate this with their own existence check when overwriting
+    would be wrong.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = _tempfile.NamedTemporaryFile(
+        mode="wb",
+        delete=False,
+        dir=str(path.parent),
+        prefix=".sm_write_",
+        suffix=".part",
+    )
+    try:
+        tmp.write(data)
+        tmp.close()
+        tmp_path = Path(tmp.name)
+    except Exception:
+        try:
+            tmp.close()
+        except Exception:
+            pass
+        tmp_leftover = Path(tmp.name)
+        if tmp_leftover.exists():
+            try:
+                tmp_leftover.unlink()
+            except OSError:
+                pass
+        raise
+
+    try:
+        _os.replace(str(tmp_path), str(path))
+    except Exception:
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+        raise
+
+
 def write_agent_output(
     role: str,
     output: str,
@@ -1512,48 +1560,42 @@ def write_agent_output(
     content = content.replace("\r\n", "\n").replace("\r", "\n")
     encoded = content.encode("utf-8")
 
-    # --- Greenfield collision check (Story 6 only — Story 7 replaces) ---
+    # --- Collision handling (Story 7) ------------------------------------
+    # If the target exists, write the new bytes to a `.candidate` sidecar
+    # and a unified `.candidate.diff` next to it; never touch the original.
     if target.exists():
-        raise FileExistsError(
-            f"target file already exists: {target!s}"
-        )
+        # Append-suffix semantics (NOT Path.with_suffix, which REPLACES).
+        candidate_path = Path(str(target) + ".candidate")
+        diff_path = Path(str(target) + ".candidate.diff")
 
-    # --- Parent dir creation ---------------------------------------------
+        # Compute diff BEFORE writing the candidate so a write failure on
+        # the candidate leaves no stale `.candidate.diff` from this run.
+        existing_text = target.read_text(encoding="utf-8")
+        rel_target = str(target.relative_to(root)).replace("\\", "/")
+        rel_candidate = str(
+            candidate_path.relative_to(root)
+        ).replace("\\", "/")
+        diff_lines = list(_difflib.unified_diff(
+            existing_text.splitlines(keepends=True),
+            content.splitlines(keepends=True),
+            fromfile=rel_target,
+            tofile=rel_candidate,
+        ))
+        diff_text = "".join(diff_lines)
+        diff_encoded = diff_text.encode("utf-8")
+
+        # Candidate first, then diff. Both are atomic; a failure on
+        # either leaves the ORIGINAL target byte-for-byte intact.
+        _atomic_write_bytes(candidate_path, encoded)
+        _atomic_write_bytes(diff_path, diff_encoded)
+
+        byte_count = len(encoded)
+        sha256_hex = _hashlib.sha256(encoded).hexdigest()
+        return (str(candidate_path), byte_count, sha256_hex)
+
+    # --- Greenfield path (Story 6 behavior) ------------------------------
     target.parent.mkdir(parents=True, exist_ok=True)
-
-    # --- Atomic write: write to temp sibling, then os.replace ------------
-    # NamedTemporaryFile with delete=False so we own cleanup; on rename
-    # success the temp is gone (renamed). On failure we unlink it.
-    tmp = _tempfile.NamedTemporaryFile(
-        mode="wb",
-        delete=False,
-        dir=str(target.parent),
-        prefix=".sm_write_",
-        suffix=".part",
-    )
-    try:
-        tmp.write(encoded)
-        tmp.close()
-        tmp_path = Path(tmp.name)
-    except Exception:
-        try:
-            tmp.close()
-        except Exception:
-            pass
-        tmp_leftover = Path(tmp.name)
-        if tmp_leftover.exists():
-            tmp_leftover.unlink()
-        raise
-
-    try:
-        _os.replace(str(tmp_path), str(target))
-    except Exception:
-        if tmp_path.exists():
-            try:
-                tmp_path.unlink()
-            except OSError:
-                pass
-        raise
+    _atomic_write_bytes(target, encoded)
 
     byte_count = len(encoded)
     sha256_hex = _hashlib.sha256(encoded).hexdigest()

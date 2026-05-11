@@ -368,6 +368,11 @@ _ALLOWED_TOP_LEVEL_MODULES = {
     # (NamedTemporaryFile in the target's parent dir + os.replace rename).
     # Stdlib-only, no posture risk.
     "tempfile",
+    # Iter 3 v2 Sprint 1 Story 7 — `difflib` is used by
+    # `write_agent_output` to render the unified diff between an
+    # existing target and a new `.candidate` sidecar on collision.
+    # Stdlib-only, pure-Python text helper, no posture risk.
+    "difflib",
     # Permitted-but-may-not-be-present (defensive — future use without
     # tripping this audit). Add only stdlib modules that pose no posture risk.
     "re", "io", "collections", "itertools", "functools", "string",

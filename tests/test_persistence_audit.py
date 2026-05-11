@@ -279,20 +279,26 @@ def test_no_path_touch_calls():
 
 def test_no_file_write_calls_outside_append_entry():
     """`.write(...)` calls are only allowed inside `_append_entry` (the
-    JSONL log appender) and `write_agent_output` (the Story 6 atomic
-    tempfile write that materializes agent output to disk). Any
+    JSONL log appender), `write_agent_output` (the Story 6 atomic
+    tempfile write that materializes agent output to disk), and
+    `_atomic_write_bytes` (the Story 7 helper that both the greenfield
+    and the .candidate-sidecar codepaths funnel through). Any
     `.write(...)` elsewhere in sm.py is a forbidden write site.
 
     Story 6 (Iter 3 v2 Sprint 1) added `write_agent_output`, which uses
     a `NamedTemporaryFile.write(...)` in its atomic-write pattern (write
-    to temp sibling, then `os.replace` rename). That's req-2's
-    materialization site — pinned here as the SECOND legal write site
-    in sm.py.
+    to temp sibling, then `os.replace` rename). Story 7 lifted that
+    write pattern into a private `_atomic_write_bytes(path, data)` helper
+    so the collision codepath (.candidate + .candidate.diff) reuses the
+    exact same atomic semantics as greenfield. The helper is the
+    THIRD legal write site, pinned here.
     """
     tree = _ast()
 
     # Build a set of node ids that belong to each allowed writer.
-    allowed_writers = {"_append_entry", "write_agent_output"}
+    allowed_writers = {
+        "_append_entry", "write_agent_output", "_atomic_write_bytes"
+    }
     inside_allowed: set[int] = set()
     found_writers: set[str] = set()
     for node in ast.walk(tree):

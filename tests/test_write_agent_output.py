@@ -666,56 +666,63 @@ def test_collision_greenfield_succeeds(tmp_path):
     assert target.is_file()
 
 
-def test_collision_existing_file_raises(tmp_path):
-    """If the target file already exists, Story 6 raises FileExistsError.
-    Story 7 WILL CHANGE this to .candidate + materialization_status —
-    edit this test then."""
+def test_collision_existing_file_writes_candidate_sidecar(tmp_path):
+    """Story 7 supersedes the Story-6 FileExistsError on collision.
+    If the target already exists, the writer SUCCEEDS by writing a
+    `.candidate` sidecar (and a `.candidate.diff`) and returns a path
+    pointing at the sidecar — never raises."""
     import sm
 
     target = tmp_path / "sm.py"
     target.write_text("pre-existing\n", encoding="utf-8")
-    with pytest.raises(FileExistsError):
-        sm.write_agent_output(
-            role="coder",
-            output="new content\n",
-            story_short_id=SHORT_ID,
-            project_root=str(tmp_path),
-        )
+    target_path, _, _ = sm.write_agent_output(
+        role="coder",
+        output="new content\n",
+        story_short_id=SHORT_ID,
+        project_root=str(tmp_path),
+    )
+    assert target_path.endswith(".candidate")
+    assert (tmp_path / "sm.py.candidate").is_file()
+    assert (tmp_path / "sm.py.candidate.diff").is_file()
 
 
 def test_collision_existing_file_left_unmodified(tmp_path):
-    """When the writer raises FileExistsError, the existing file's
-    content must be UNCHANGED — atomic write must not leave a partial
-    overwrite, and the rename must not have fired."""
+    """Story 7 contract: the original target's bytes are UNCHANGED on
+    collision. (Spirit of the old Story-6 test preserved — the assertion
+    that the operator's file is never at risk still holds, but the
+    writer no longer raises.)"""
     import sm
 
     target = tmp_path / "sm.py"
     original = "ORIGINAL CONTENT — DO NOT TOUCH\n"
     target.write_text(original, encoding="utf-8")
-    with pytest.raises(FileExistsError):
-        sm.write_agent_output(
-            role="coder",
-            output="new content\n",
-            story_short_id=SHORT_ID,
-            project_root=str(tmp_path),
-        )
+    sm.write_agent_output(
+        role="coder",
+        output="new content\n",
+        story_short_id=SHORT_ID,
+        project_root=str(tmp_path),
+    )
     assert target.read_text(encoding="utf-8") == original
 
 
-def test_collision_existing_test_file_via_hint_raises(tmp_path):
-    """Path-hint-routed file also collides per the same rule."""
+def test_collision_existing_test_file_via_hint_writes_candidate(tmp_path):
+    """Path-hint-routed file also flips to .candidate-sidecar policy
+    under Story 7 (was: also raised FileExistsError under Story 6)."""
     import sm
 
     target = tmp_path / "tests" / "test_foo.py"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text("# existing\n", encoding="utf-8")
-    with pytest.raises(FileExistsError):
-        sm.write_agent_output(
-            role="test_writer",
-            output="# path: tests/test_foo.py\nbody\n",
-            story_short_id=SHORT_ID,
-            project_root=str(tmp_path),
-        )
+    sm.write_agent_output(
+        role="test_writer",
+        output="# path: tests/test_foo.py\nbody\n",
+        story_short_id=SHORT_ID,
+        project_root=str(tmp_path),
+    )
+    assert (tmp_path / "tests" / "test_foo.py.candidate").is_file()
+    assert (tmp_path / "tests" / "test_foo.py.candidate.diff").is_file()
+    # And the original is unchanged.
+    assert target.read_text(encoding="utf-8") == "# existing\n"
 
 
 # ---------------------------------------------------------------------------
