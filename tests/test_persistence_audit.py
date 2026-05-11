@@ -278,21 +278,32 @@ def test_no_path_touch_calls():
 
 
 def test_no_file_write_calls_outside_append_entry():
-    """No `file.write(...)` writes anywhere other than the `_append_entry`
-    body. We scan the AST for any `.write(...)` Attribute-Call and
-    require every one to live inside the `_append_entry` FunctionDef.
+    """`.write(...)` calls are only allowed inside `_append_entry` (the
+    JSONL log appender) and `write_agent_output` (the Story 6 atomic
+    tempfile write that materializes agent output to disk). Any
+    `.write(...)` elsewhere in sm.py is a forbidden write site.
+
+    Story 6 (Iter 3 v2 Sprint 1) added `write_agent_output`, which uses
+    a `NamedTemporaryFile.write(...)` in its atomic-write pattern (write
+    to temp sibling, then `os.replace` rename). That's req-2's
+    materialization site — pinned here as the SECOND legal write site
+    in sm.py.
     """
     tree = _ast()
 
-    # Build a set of node ids that belong to _append_entry.
-    append_entry: ast.FunctionDef | None = None
+    # Build a set of node ids that belong to each allowed writer.
+    allowed_writers = {"_append_entry", "write_agent_output"}
+    inside_allowed: set[int] = set()
+    found_writers: set[str] = set()
     for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == "_append_entry":
-            append_entry = node
-            break
-    assert append_entry is not None
-
-    inside_append_entry: set[int] = {id(n) for n in ast.walk(append_entry)}
+        if isinstance(node, ast.FunctionDef) and node.name in allowed_writers:
+            found_writers.add(node.name)
+            for inner in ast.walk(node):
+                inside_allowed.add(id(inner))
+    missing = allowed_writers - found_writers
+    assert not missing, (
+        f"missing required writer functions in sm.py: {sorted(missing)!r}"
+    )
 
     offenders: list[str] = []
     for node in ast.walk(tree):
@@ -302,13 +313,13 @@ def test_no_file_write_calls_outside_append_entry():
                 # Skip allowed names: write_text / write_bytes are
                 # different attribute names entirely, so they don't
                 # match here.
-                if id(node) not in inside_append_entry:
+                if id(node) not in inside_allowed:
                     offenders.append(
                         f"line {getattr(node, 'lineno', '?')}"
                     )
     assert offenders == [], (
-        f"only `_append_entry` may use `.write(...)`; got writes at: "
-        f"{offenders!r}"
+        f"only `_append_entry` and `write_agent_output` may use "
+        f"`.write(...)`; got writes at: {offenders!r}"
     )
 
 

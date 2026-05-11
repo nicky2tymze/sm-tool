@@ -363,6 +363,11 @@ _ALLOWED_TOP_LEVEL_MODULES = {
     "copy", "datetime", "hashlib", "json", "uuid", "pathlib", "typing",
     # Inline imports inside main() / __main__ guard
     "os", "sys",
+    # Iter 3 v2 Sprint 1 Story 6 — `tempfile` is used by
+    # `write_agent_output` for the atomic-write tempfile pattern
+    # (NamedTemporaryFile in the target's parent dir + os.replace rename).
+    # Stdlib-only, no posture risk.
+    "tempfile",
     # Permitted-but-may-not-be-present (defensive — future use without
     # tripping this audit). Add only stdlib modules that pose no posture risk.
     "re", "io", "collections", "itertools", "functools", "string",

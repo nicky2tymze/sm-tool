@@ -12,7 +12,9 @@ import copy as _copy
 import datetime as _dt
 import hashlib as _hashlib
 import json
+import os as _os
 import re
+import tempfile as _tempfile
 import uuid
 from pathlib import Path
 from typing import Callable, Iterator, Optional
@@ -47,6 +49,7 @@ __all__ = [
     "build_entry",
     "make_materialized_file_entry",
     "make_materialization_status_entry",
+    "write_agent_output",
     "read_entries",
     "derive_state",
     "ingest",
@@ -1337,6 +1340,224 @@ def make_materialization_status_entry(
             "reason": reason,
         },
     )
+
+
+# ---------------------------------------------------------------------------
+# Iter 3 v2 Sprint 1 Story 6 — file write dispatch.
+#
+# `write_agent_output` takes an agent's text output and writes it to disk at
+# a path determined by role + optional `# path:` directive on line 0.
+#
+# Scope (Story 6, greenfield only):
+#   - Roles {"test_writer", "coder"} only. Reviewer / unknown raise ValueError.
+#   - Default path by role: test_writer -> `tests/test_<short_id>.py`,
+#     coder -> `sm.py`.
+#   - Optional `# path: <relative_path>` line-0 directive overrides the
+#     role default. Hint line is stripped from the written content.
+#   - Path validation: relative, no drive letter, no `..`, no backslash,
+#     no spaces / `#` in the path, must stay inside `project_root`.
+#   - Newlines normalized to LF; UTF-8 encoding.
+#   - Atomic write: tempfile in target's parent dir + `os.replace` rename.
+#   - Greenfield only: if the resolved target exists, raises
+#     `FileExistsError`. Story 7 will replace this with a .candidate
+#     sidecar + materialization_status(collision) policy.
+#   - Returns `(absolute_target_path, byte_count, sha256_hex)` — the
+#     three values that feed straight into `make_materialized_file_entry`.
+# ---------------------------------------------------------------------------
+
+_WRITE_AGENT_ROLES = frozenset({"test_writer", "coder"})
+_PATH_HINT_PREFIX = "# path:"
+# Allowed chars in a path-hint relative path. Forward slashes for nesting,
+# letters / digits / dot / dash / underscore for filenames. Spaces, `#`,
+# `:`, backslash are all disallowed so the trailing-comment shape
+# `foo.py # extra` fails fast.
+_PATH_HINT_CHARS_RE = re.compile(r"^[A-Za-z0-9_./-]+$")
+# Allowed chars in `story_short_id`. Alphanumeric plus dash / underscore.
+# Excludes path separators (`/`, `\\`), `..`, and any other punctuation.
+_STORY_SHORT_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def write_agent_output(
+    role: str,
+    output: str,
+    story_short_id: str,
+    project_root: Optional[str] = None,
+) -> tuple:
+    """Write an agent's output to disk and return its provenance triple.
+
+    Returns ``(absolute_target_path, byte_count, sha256_hex)`` where:
+      - ``absolute_target_path`` is the absolute path on disk of the file
+        that was written.
+      - ``byte_count`` is the size in bytes of the content AFTER
+        hint-strip and newline normalization (i.e. matches the file).
+      - ``sha256_hex`` is the lowercase-hex SHA-256 of the same bytes.
+
+    Args:
+        role: One of ``"test_writer"`` or ``"coder"``. Anything else
+            (including ``"reviewer"``, which doesn't materialize files)
+            raises ``ValueError``.
+        output: The agent's raw text. If line 0 matches
+            ``# path: <relative_path>``, the path overrides the role
+            default and the hint line is stripped from the written
+            content.
+        story_short_id: Short identifier used to build the test_writer
+            default path (``tests/test_<short_id>.py``). Must be a
+            non-empty string with no path separators / ``..``.
+        project_root: Project root directory. ``None`` means
+            ``Path.cwd()``. All paths resolve under this root; any
+            resolved target outside it raises ``ValueError``.
+
+    Raises:
+        ValueError: Bad role, bad story_short_id, malformed / unsafe
+            path hint, or path escapes project_root.
+        FileExistsError: Greenfield contract — target already exists
+            (Story 7 will replace this with a .candidate sidecar).
+        OSError: Propagated from filesystem operations (e.g. failed
+            rename); the atomic-write tempfile is cleaned up before
+            re-raise.
+    """
+    # --- Role validation --------------------------------------------------
+    if not isinstance(role, str):
+        raise ValueError(
+            f"role must be a string, got {role.__class__.__name__}"
+        )
+    if role not in _WRITE_AGENT_ROLES:
+        raise ValueError(
+            f"role must be one of {sorted(_WRITE_AGENT_ROLES)!r}, "
+            f"got {role!r}"
+        )
+
+    # --- `output` type validation ----------------------------------------
+    if not isinstance(output, str):
+        raise ValueError(
+            f"output must be a string, got {output.__class__.__name__}"
+        )
+
+    # --- `story_short_id` validation -------------------------------------
+    if not isinstance(story_short_id, str) or not story_short_id:
+        raise ValueError(
+            f"story_short_id must be a non-empty string, got "
+            f"{story_short_id!r}"
+        )
+    if not _STORY_SHORT_ID_RE.match(story_short_id):
+        raise ValueError(
+            f"story_short_id must match [A-Za-z0-9_-]+, got "
+            f"{story_short_id!r}"
+        )
+
+    # --- Project root ----------------------------------------------------
+    root = Path(project_root) if project_root else Path.cwd()
+    root = root.resolve()
+
+    # --- Parse line-0 path hint ------------------------------------------
+    # Split on `\n` (the canonical agent line terminator). The hint must
+    # be the literal first line — anywhere else is regular code content.
+    lines = output.split("\n")
+    rel_path: str
+    content: str
+    if lines and lines[0].startswith(_PATH_HINT_PREFIX):
+        hint_body = lines[0][len(_PATH_HINT_PREFIX):].strip()
+        if not hint_body:
+            raise ValueError(
+                "path hint is empty — `# path:` with no path is malformed"
+            )
+        # Reject backslash explicitly so the Windows-only form gets a
+        # clearer error than the chars regex.
+        if "\\" in hint_body:
+            raise ValueError(
+                f"path hint must use POSIX `/` not backslash, got "
+                f"{hint_body!r}"
+            )
+        # Reject `..` segment anywhere in the hint (defense in depth
+        # before the resolved-path check).
+        if ".." in hint_body.split("/"):
+            raise ValueError(
+                f"path hint must not contain `..`, got {hint_body!r}"
+            )
+        # POSIX-absolute paths.
+        if hint_body.startswith("/"):
+            raise ValueError(
+                f"path hint must be relative, got absolute {hint_body!r}"
+            )
+        # Char allowlist catches drive letters (`:`), spaces, `#`, and
+        # other unsafe shell-shaped chars in one swoop.
+        if not _PATH_HINT_CHARS_RE.match(hint_body):
+            raise ValueError(
+                f"path hint contains invalid characters; allowed: "
+                f"[A-Za-z0-9_./-]; got {hint_body!r}"
+            )
+        rel_path = hint_body
+        content = "\n".join(lines[1:])
+    else:
+        if role == "test_writer":
+            rel_path = f"tests/test_{story_short_id}.py"
+        else:  # role == "coder"
+            rel_path = "sm.py"
+        content = output
+
+    # --- Resolve target path under root ----------------------------------
+    target = (root / rel_path).resolve()
+    # Defense in depth: re-verify the resolved path is under root. The
+    # `..` and absolute-path checks above already block the obvious
+    # vectors; this catches anything they missed (e.g. symlinks).
+    try:
+        target.relative_to(root)
+    except ValueError:
+        raise ValueError(
+            f"path hint escapes project_root {root!r}: {rel_path!r}"
+        )
+
+    # --- Newline normalization + UTF-8 encoding --------------------------
+    # CRLF first so the lone-CR pass doesn't double-normalize.
+    content = content.replace("\r\n", "\n").replace("\r", "\n")
+    encoded = content.encode("utf-8")
+
+    # --- Greenfield collision check (Story 6 only — Story 7 replaces) ---
+    if target.exists():
+        raise FileExistsError(
+            f"target file already exists: {target!s}"
+        )
+
+    # --- Parent dir creation ---------------------------------------------
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    # --- Atomic write: write to temp sibling, then os.replace ------------
+    # NamedTemporaryFile with delete=False so we own cleanup; on rename
+    # success the temp is gone (renamed). On failure we unlink it.
+    tmp = _tempfile.NamedTemporaryFile(
+        mode="wb",
+        delete=False,
+        dir=str(target.parent),
+        prefix=".sm_write_",
+        suffix=".part",
+    )
+    try:
+        tmp.write(encoded)
+        tmp.close()
+        tmp_path = Path(tmp.name)
+    except Exception:
+        try:
+            tmp.close()
+        except Exception:
+            pass
+        tmp_leftover = Path(tmp.name)
+        if tmp_leftover.exists():
+            tmp_leftover.unlink()
+        raise
+
+    try:
+        _os.replace(str(tmp_path), str(target))
+    except Exception:
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+        raise
+
+    byte_count = len(encoded)
+    sha256_hex = _hashlib.sha256(encoded).hexdigest()
+    return (str(target), byte_count, sha256_hex)
 
 
 def _derive_state_full() -> tuple:
