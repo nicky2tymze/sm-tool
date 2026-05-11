@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sm-tool"
-version = "0.3.0-dev"
+version = "0.4.1"
 description = "Scrum-master pipeline tool — story decomposition and per-story execution"
 readme = "README.md"
 license = { text = "MIT" }

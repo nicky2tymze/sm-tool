@@ -41,11 +41,15 @@ catch for free.
 this is additive belt-and-suspenders. Role specs change rarely;
 maintenance cost is near zero.
 
-**Note:** A draft of this test was written during Iter 2 close
-(10/10 green) but rolled back per Architect process correction:
-mid-iteration discoveries are filed as findings for next-sprint
-planning, not slipped in as inline stories — even for dogfood. The
-draft is recoverable from git history if Iter 3 planning accepts it.
+**Note (corrected 2026-05-11):** A draft of this test was written
+during Iter 2 close (10/10 green) but rolled back per Architect
+process correction: mid-iteration discoveries are filed as findings
+for next-sprint planning, not slipped in as inline stories — even for
+dogfood. The original draft was NOT in git history (written and
+deleted within the same session before any commit included it); the
+"recoverable from git history" phrasing in the first draft of this
+finding was wrong. The test was rewritten verbatim from orchestrator
+session context during MiniSprint 2.1 (target v0.4.1).
 
 ---
 
