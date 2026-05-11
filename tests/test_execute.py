@@ -1681,10 +1681,16 @@ def test_cli_no_active_iteration_non_zero(cli_log):
 
 
 def test_post_spawn_approve_log_has_six_new_entries(isolated_log):
-    """A successful approve-run appends 6 new entries:
-    state_change(planned->in_progress), testwriter_output, coder_output,
+    """A successful approve-run appends 8 new entries:
+    state_change(planned->in_progress), testwriter_output,
+    materialized_file(test_writer), coder_output, materialized_file(coder),
     state_change(in_progress->in_review), reviewer_approval,
-    state_change(in_review->accepted)."""
+    state_change(in_review->accepted).
+
+    Iter 3 v2 Sprint 1 Story 8 cascade: write_agent_output is now wired
+    into the pipeline, adding one `materialized_file` entry per spawn
+    stage that produces a file (test_writer + coder). 6 -> 8.
+    """
     import sm
     _, in_sprint, _ = _seed_sprint()
     before = list(sm.read_entries())
@@ -1695,14 +1701,17 @@ def test_post_spawn_approve_log_has_six_new_entries(isolated_log):
                                              test_result="ok"))
     after = list(sm.read_entries())
     new_count = len(after) - len(before)
-    assert new_count == 6, (
-        f"approve-run must append exactly 6 entries; got {new_count}\n"
+    assert new_count == 8, (
+        f"approve-run must append exactly 8 entries; got {new_count}\n"
         f"new entry types: {[e['type'] for e in after[len(before):]]!r}"
     )
 
 
 def test_post_spawn_reject_log_has_six_new_entries(isolated_log):
-    """A reject-run appends 6 new entries (same as approve)."""
+    """A reject-run appends 8 new entries (same as approve — Story 8
+    cascade: TW + Coder materialization fires before Reviewer renders
+    verdict, so rejection doesn't suppress the two `materialized_file`
+    entries)."""
     import sm
     _, in_sprint, _ = _seed_sprint()
     before = list(sm.read_entries())
@@ -1713,15 +1722,16 @@ def test_post_spawn_reject_log_has_six_new_entries(isolated_log):
                                              test_result="3 fails"))
     after = list(sm.read_entries())
     new_count = len(after) - len(before)
-    assert new_count == 6, (
-        f"reject-run must append exactly 6 entries; got {new_count}\n"
+    assert new_count == 8, (
+        f"reject-run must append exactly 8 entries; got {new_count}\n"
         f"new entry types: {[e['type'] for e in after[len(before):]]!r}"
     )
 
 
 def test_post_spawn_already_in_progress_appends_five(isolated_log):
-    """If the story is already in_progress, execute writes 5 new entries
-    (skipping the first state_change)."""
+    """If the story is already in_progress, execute writes 7 new entries
+    (skipping the first state_change). Iter 3 v2 Sprint 1 Story 8 cascade:
+    5 -> 7 (two extra `materialized_file` entries for TW + Coder)."""
     import sm
     _, in_sprint, _ = _seed_sprint()
     sid = in_sprint[0]
@@ -1734,8 +1744,8 @@ def test_post_spawn_already_in_progress_appends_five(isolated_log):
                                              test_result="ok"))
     after = list(sm.read_entries())
     new_count = len(after) - len(before)
-    assert new_count == 5, (
-        f"in_progress-start approve-run must append exactly 5 entries; "
+    assert new_count == 7, (
+        f"in_progress-start approve-run must append exactly 7 entries; "
         f"got {new_count}\n"
         f"new entry types: {[e['type'] for e in after[len(before):]]!r}"
     )

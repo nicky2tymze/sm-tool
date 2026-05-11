@@ -3487,6 +3487,7 @@ def execute(
     spawn_test_writer: Optional[Callable] = None,
     spawn_coder: Optional[Callable] = None,
     spawn_reviewer: Optional[Callable] = None,
+    project_root: Optional[str] = None,
 ) -> dict:
     """Drive one in-sprint story through the full TestWriter -> Coder ->
     Reviewer build pipeline.
@@ -3640,6 +3641,18 @@ def execute(
             notes="execute: starting pipeline",
         )
 
+    # --- Resolve materialization anchor for write_agent_output. ---
+    # Story 8: project_root defaults to LOG_PATH.parent so materialized
+    # files land next to the active log instead of in the source tree
+    # during tests. Operator-supplied project_root wins (CLI / scripted
+    # callers can override).
+    if project_root is not None:
+        _materialize_root = str(project_root)
+    else:
+        _materialize_root = str(LOG_PATH.parent) if LOG_PATH is not None else None
+
+    short_id = story_id[:8]
+
     # --- Step 2: TestWriter. ---
     tw_path = resolve_role_spec("test_writer")
     tw_hash = _role_spec_hash("test_writer")
@@ -3655,6 +3668,50 @@ def execute(
     )
     _append_entry(tw_entry)
 
+    # --- Step 2.5: Story 8 — materialize TestWriter output to disk. ---
+    try:
+        _tw_abs_path, _tw_byte_count, _tw_sha256 = write_agent_output(
+            role="test_writer",
+            output=test_code,
+            story_short_id=short_id,
+            project_root=_materialize_root,
+        )
+    except (ValueError, FileExistsError, OSError) as e:
+        _status_entry = make_materialization_status_entry(
+            story_id=story_id,
+            status="rejected",
+            reason=f"test_writer materialization failed: {e}",
+        )
+        _append_entry(_status_entry)
+        raise
+    _tw_root = (
+        Path(_materialize_root).resolve()
+        if _materialize_root is not None
+        else Path.cwd().resolve()
+    )
+    _tw_rel_path = str(
+        Path(_tw_abs_path).relative_to(_tw_root)
+    ).replace("\\", "/")
+    _tw_mf_entry = make_materialized_file_entry(
+        story_id=story_id,
+        role="test_writer",
+        target_path=_tw_rel_path,
+        byte_count=_tw_byte_count,
+        sha256=_tw_sha256,
+    )
+    _append_entry(_tw_mf_entry)
+    if _tw_rel_path.endswith(".candidate"):
+        _tw_target_rel = _tw_rel_path[: -len(".candidate")]
+        _tw_status_entry = make_materialization_status_entry(
+            story_id=story_id,
+            status="collision",
+            reason=(
+                f"target {_tw_target_rel} already existed; wrote candidate "
+                f"sidecar at {_tw_rel_path}"
+            ),
+        )
+        _append_entry(_tw_status_entry)
+
     # --- Step 3: Coder. ---
     coder_path = resolve_role_spec("coder")
     coder_hash = _role_spec_hash("coder")
@@ -3669,6 +3726,50 @@ def execute(
         },
     )
     _append_entry(coder_entry)
+
+    # --- Step 3.5: Story 8 — materialize Coder output to disk. ---
+    try:
+        _coder_abs_path, _coder_byte_count, _coder_sha256 = write_agent_output(
+            role="coder",
+            output=impl_code,
+            story_short_id=short_id,
+            project_root=_materialize_root,
+        )
+    except (ValueError, FileExistsError, OSError) as e:
+        _status_entry = make_materialization_status_entry(
+            story_id=story_id,
+            status="rejected",
+            reason=f"coder materialization failed: {e}",
+        )
+        _append_entry(_status_entry)
+        raise
+    _coder_root = (
+        Path(_materialize_root).resolve()
+        if _materialize_root is not None
+        else Path.cwd().resolve()
+    )
+    _coder_rel_path = str(
+        Path(_coder_abs_path).relative_to(_coder_root)
+    ).replace("\\", "/")
+    _coder_mf_entry = make_materialized_file_entry(
+        story_id=story_id,
+        role="coder",
+        target_path=_coder_rel_path,
+        byte_count=_coder_byte_count,
+        sha256=_coder_sha256,
+    )
+    _append_entry(_coder_mf_entry)
+    if _coder_rel_path.endswith(".candidate"):
+        _coder_target_rel = _coder_rel_path[: -len(".candidate")]
+        _coder_status_entry = make_materialization_status_entry(
+            story_id=story_id,
+            status="collision",
+            reason=(
+                f"target {_coder_target_rel} already existed; wrote "
+                f"candidate sidecar at {_coder_rel_path}"
+            ),
+        )
+        _append_entry(_coder_status_entry)
 
     # --- Step 4: in_progress -> in_review. ---
     transition_story(
