@@ -1445,15 +1445,36 @@ def test_coder_still_raises_not_implemented_under_story_7(
 
 def test_reviewer_still_raises_not_implemented_under_story_7(
         isolated_log, api_key_env, clean_resolver_env, monkeypatch):
-    """spawn_reviewer=None STILL raises NotImplementedError under
-    Story 7 — Story 9 wires reviewer."""
+    """spawn_reviewer=None no longer raises NotImplementedError under
+    Story 9 — it routes to the real `_default_execute_reviewer_spawn`.
+
+    This test was originally a Story-7-era forward-looking guard for
+    "Story 9 will wire reviewer." Story 9 has shipped, so the guard
+    inverts: spawn_reviewer=None must fall through to the real default.
+    The reviewer-stage fake-SDK response is the default test-code
+    string (not a valid reviewer JSON verdict), so the real default's
+    `parse_agent_json` rejects it with a `ReviewerAgentError` — but the
+    important thing here is that NotImplementedError is NOT raised.
+    Behavior-preserving update — see Story 9's cascade list.
+    """
     import sm
     _, in_sprint, _ = _seed_sprint()
     _install_fake_anthropic(monkeypatch)
-    with pytest.raises(NotImplementedError):
+    try:
         sm.execute(in_sprint[0],
                    spawn_coder=_make_coder(),
                    spawn_reviewer=None)
+    except NotImplementedError as e:
+        pytest.fail(
+            f"Story 9: spawn_reviewer=None must fall through to the real "
+            f"default, not raise NotImplementedError; got: {e!s}"
+        )
+    except sm.ReviewerAgentError:
+        # Expected: the default test-code response is not valid JSON, so
+        # parse_agent_json (Story 4) raises ReviewerAgentError. The test
+        # only pins that NotImplementedError is NOT raised — Story 9 has
+        # shipped, the linchpin is closed.
+        pass
 
 
 # ===========================================================================

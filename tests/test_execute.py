@@ -423,19 +423,38 @@ def test_execute_error_can_be_caught_as_value_error():
 # ===========================================================================
 
 
-def test_default_all_none_raises_not_implemented(isolated_log):
-    """No spawn callables passed -> NotImplementedError."""
+def test_default_all_none_raises_not_implemented(isolated_log, monkeypatch):
+    """No spawn callables passed -> MissingAPIKeyError.
+
+    Iter 2 Stories 7+8+9 inverted ALL THREE spawn defaults: None now
+    routes to the real `_default_execute_*_spawn` callables. With no
+    ANTHROPIC_API_KEY set, the first real default (test_writer) raises
+    MissingAPIKeyError instead of the old NotImplementedError.
+    Behavior-preserving update: the test intent (default refuses silent
+    run) is preserved; only the mechanism changed per the established
+    Iter 2 cascade pattern.
+    """
     import sm
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     _, in_sprint, _ = _seed_sprint()
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(sm.MissingAPIKeyError):
         sm.execute(in_sprint[0])
 
 
-def test_default_explicit_none_raises_not_implemented(isolated_log):
-    """Passing all None explicitly -> NotImplementedError."""
+def test_default_explicit_none_raises_not_implemented(
+        isolated_log, monkeypatch):
+    """Passing all None explicitly -> MissingAPIKeyError.
+
+    Iter 2 Stories 7+8+9 inverted ALL THREE spawn defaults: explicit
+    None routes to the real `_default_execute_*_spawn` callables.
+    Behavior-preserving update — see
+    `test_default_all_none_raises_not_implemented` for the cascade
+    pattern.
+    """
     import sm
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     _, in_sprint, _ = _seed_sprint()
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(sm.MissingAPIKeyError):
         sm.execute(in_sprint[0],
                    spawn_test_writer=None,
                    spawn_coder=None,
@@ -484,37 +503,77 @@ def test_default_only_coder_missing_raises(isolated_log, monkeypatch):
                    spawn_reviewer=_make_reviewer())
 
 
-def test_default_only_reviewer_missing_raises(isolated_log):
-    """spawn_reviewer=None (others provided) -> NotImplementedError."""
+def test_default_only_reviewer_missing_raises(isolated_log, monkeypatch):
+    """spawn_reviewer=None (others provided) -> MissingAPIKeyError.
+
+    Iter 2 Story 9 inverted spawn_reviewer's default: None now routes
+    to the real `_default_execute_reviewer_spawn`. With no
+    ANTHROPIC_API_KEY set, the real default raises MissingAPIKeyError
+    instead of the old NotImplementedError. Behavior-preserving update:
+    the test intent (default refuses silent run) is preserved; only the
+    mechanism changed per the established Iter 2 cascade pattern (same
+    flip as L445/L466).
+    """
     import sm
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     _, in_sprint, _ = _seed_sprint()
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(sm.MissingAPIKeyError):
         sm.execute(in_sprint[0],
                    spawn_test_writer=_make_test_writer(),
                    spawn_coder=_make_coder(),
                    spawn_reviewer=None)
 
 
-def test_default_error_mentions_iter_2(isolated_log):
-    """The NotImplementedError message points at Iter 2."""
+def test_default_error_mentions_iter_2(isolated_log, monkeypatch):
+    """The MissingAPIKeyError message names ANTHROPIC_API_KEY.
+
+    Iter 2 Story 9 inverted the LAST spawn default. There is no more
+    "Iter 2 ships later" message — the NotImplementedError gate is gone.
+    Behavior-preserving update: this guard now pins that the default
+    refuses to silently run when no API key is configured, and the
+    error message names the env var that operators need to set.
+    """
     import sm
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     _, in_sprint, _ = _seed_sprint()
-    with pytest.raises(NotImplementedError) as exc_info:
+    with pytest.raises(sm.MissingAPIKeyError) as exc_info:
         sm.execute(in_sprint[0])
-    msg = str(exc_info.value).lower()
-    assert "iter 2" in msg or "iteration 2" in msg, (
-        f"NotImplementedError must mention Iter 2; got: {exc_info.value!s}"
+    assert "ANTHROPIC_API_KEY" in str(exc_info.value), (
+        f"MissingAPIKeyError must name ANTHROPIC_API_KEY; got: "
+        f"{exc_info.value!s}"
     )
 
 
-def test_default_writes_no_log_entry(isolated_log):
-    """When default spawns raise, no log entry is written."""
+def test_default_writes_no_log_entry(isolated_log, monkeypatch):
+    """When default spawns fail on missing API key, no spawn-stage
+    output entry is written.
+
+    Iter 2 Story 9: the NotImplementedError gate is gone, so the
+    pipeline now runs through validation + the in_progress transition
+    BEFORE the first real default (test_writer) fires and raises
+    MissingAPIKeyError. The in_progress transition entry IS written
+    (truthful audit trail — Iter 1 Story 23 explicitly allows post-spawn
+    partial failures to keep already-written entries). What this guard
+    pins now is that no `testwriter_output`, `coder_output`, or
+    `reviewer_approval` entry leaks when the missing-API-key trap
+    fires.
+    """
     import sm
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     _, in_sprint, _ = _seed_sprint()
-    seeded = isolated_log.read_bytes()
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(sm.MissingAPIKeyError):
         sm.execute(in_sprint[0])
-    assert isolated_log.read_bytes() == seeded
+    entries = list(sm.read_entries())
+    spawn_stage_entries = [
+        e for e in entries
+        if e.get("type") in ("testwriter_output", "coder_output",
+                             "reviewer_approval")
+    ]
+    assert spawn_stage_entries == [], (
+        f"expected no spawn-stage output entries on the missing-API-key "
+        f"failure path; got {len(spawn_stage_entries)}: "
+        f"{[e.get('type') for e in spawn_stage_entries]!r}"
+    )
 
 
 # ===========================================================================

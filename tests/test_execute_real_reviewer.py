@@ -700,9 +700,9 @@ def test_happy_path_default_reviewer_approve_writes_accepted_state(
                      if e.get("type") == "story_state_change"
                      and e.get("story_id") == in_sprint[0]]
     final = state_changes[-1]
-    assert final["new_state"] == "accepted", (
+    assert final["to_state"] == "accepted", (
         f"expected final state 'accepted' on approve path; got "
-        f"{final['new_state']!r}"
+        f"{final['to_state']!r}"
     )
 
 
@@ -724,9 +724,9 @@ def test_happy_path_default_reviewer_reject_writes_rejected_state(
                      if e.get("type") == "story_state_change"
                      and e.get("story_id") == in_sprint[0]]
     final = state_changes[-1]
-    assert final["new_state"] == "rejected", (
+    assert final["to_state"] == "rejected", (
         f"expected final state 'rejected' on reject path; got "
-        f"{final['new_state']!r}"
+        f"{final['to_state']!r}"
     )
 
 
@@ -2011,9 +2011,9 @@ def test_injectable_reviewer_callable_return_value_used(
                      if e.get("type") == "story_state_change"
                      and e.get("story_id") == in_sprint[0]]
     final = state_changes[-1]
-    assert final["new_state"] == "rejected", (
+    assert final["to_state"] == "rejected", (
         f"injected reject must drive final state to rejected; got "
-        f"{final['new_state']!r}"
+        f"{final['to_state']!r}"
     )
 
 
@@ -2376,7 +2376,7 @@ def test_e2e_all_three_defaults_fire_approve_path(
     state_changes = [e for e in entries
                      if e.get("type") == "story_state_change"
                      and e.get("story_id") == in_sprint[0]]
-    assert state_changes[-1]["new_state"] == "accepted"
+    assert state_changes[-1]["to_state"] == "accepted"
 
 
 def test_e2e_coder_output_flows_to_reviewer_default(
@@ -2445,7 +2445,7 @@ def test_e2e_all_three_defaults_fire_reject_path(
     state_changes = [e for e in entries
                      if e.get("type") == "story_state_change"
                      and e.get("story_id") == in_sprint[0]]
-    assert state_changes[-1]["new_state"] == "rejected"
+    assert state_changes[-1]["to_state"] == "rejected"
 
 
 def test_e2e_reject_path_test_result_in_approval_entry(

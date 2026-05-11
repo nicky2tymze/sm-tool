@@ -1354,6 +1354,155 @@ def _default_execute_coder_spawn(
         ) from e
 
 
+# ---------------------------------------------------------------------------
+# Iter 2 Story 9 — real `spawn_reviewer` default for `execute`.
+#
+# `_default_execute_reviewer_spawn` is the real (non-injected) spawn-agent
+# the `execute` function falls back to for the Reviewer stage when no
+# callable is injected. This is the THIRD real-agent default routed through
+# `parse_agent_json` (after Story 6's decompose; Stories 7/8 returned raw
+# text so they bypassed parsing). It is ALSO the LAST real-agent linchpin
+# of Iter 2 — Story 9 removes the final `NotImplementedError` from
+# `execute()`'s default-spawn gate, so all three defaults are now live.
+#
+# Differences from Stories 7/8:
+#   - signature is `(role_spec_path: str, story: dict, test_code: str,
+#     impl_code: str) -> dict` per Iter 1 Story 23's injectable contract
+#     (Reviewer takes both test_code AND impl_code AND returns a dict)
+#   - role is "reviewer" (drives resolve_model / resolve_max_tokens)
+#   - user message bundles role-spec text + story dict (as JSON) + test_code
+#     + impl_code + instruction to return a JSON verdict
+#   - the SDK response IS routed through `parse_agent_json(..., role=
+#     "reviewer")` because Reviewer returns JSON
+#   - SHAPE VALIDATION: the parsed object MUST be a dict containing
+#     EXACTLY two keys `approved` (bool) AND `test_result` (str). Extra
+#     keys, missing keys, wrong types, or top-level-not-a-dict all raise
+#     `ReviewerAgentError` with a descriptive message naming the violation
+#   - bool check is STRICT — int `0`/`1` are rejected (Python treats
+#     `True == 1` and `isinstance(True, int)`, so the test for "is bool"
+#     must use `type(x) is bool`, not `isinstance(x, bool)`)
+#   - SDK exceptions wrap as `ReviewerAgentError` with `__cause__` chained;
+#     MissingAPIKeyError AND ConfigError propagate UNCHANGED; parse-time
+#     `ReviewerAgentError` (already typed by Story 4) propagates UNCHANGED
+#     (do NOT double-wrap)
+#
+# PRIVATE; NOT in __all__.
+# ---------------------------------------------------------------------------
+
+def _default_execute_reviewer_spawn(
+    role_spec_path: str,
+    story: dict,
+    test_code: str,
+    impl_code: str,
+) -> dict:
+    """Default spawn_reviewer for `execute` — calls the real Anthropic SDK.
+
+    Composes Story 2 (resolve_api_key) + Story 3 (resolve_model,
+    resolve_max_tokens) + role-spec file read + Story 5
+    (_invoke_anthropic) + Story 4 (parse_agent_json, role="reviewer") +
+    Story 9 shape validation into one SDK round-trip. SDK exceptions wrap
+    as `ReviewerAgentError` with `__cause__` chained; MissingAPIKeyError
+    and ConfigError propagate unchanged so the CLI maps
+    MissingAPIKeyError to exit 12 and ConfigError stays diagnosable.
+    Parse-time `ReviewerAgentError` from `parse_agent_json` propagates
+    unchanged (no double-wrap). Shape violations raise
+    `ReviewerAgentError` with a descriptive message.
+
+    Signature matches the injectable contract pinned by Iter 1 Story 23.
+    Returns the parsed + validated reviewer verdict dict
+    `{"approved": bool, "test_result": str}`.
+    """
+    # Resolve at call time so env-var overrides are honored every call.
+    api_key = resolve_api_key()  # raises MissingAPIKeyError if unset
+    model = resolve_model("reviewer")
+    max_tokens = resolve_max_tokens("reviewer")
+
+    # Read the role-spec file the caller already resolved. Any OS error
+    # (FileNotFoundError, PermissionError) propagates verbatim — the
+    # caller decides whether to wrap. Mirrors Stories 6 / 7 / 8.
+    role_spec_text = Path(role_spec_path).read_text(encoding="utf-8")
+
+    # Single user-role message bundling role-spec + story dict (as JSON)
+    # + test_code + impl_code + instruction to return a JSON verdict.
+    # Exact framing left to the Coder; tests pin that all four pieces
+    # appear in the message content.
+    user_content = (
+        f"{role_spec_text}\n\n"
+        f"## Story under review\n\n"
+        f"{json.dumps(story, indent=2)}\n\n"
+        f"## Test code\n\n"
+        f"{test_code}\n\n"
+        f"## Implementation code\n\n"
+        f"{impl_code}\n\n"
+        f"Return a JSON object with keys 'approved' (bool) and "
+        f"'test_result' (str) per the role spec."
+    )
+    messages = [{"role": "user", "content": user_content}]
+
+    try:
+        raw = _invoke_anthropic(messages, model, max_tokens, api_key)
+    except MissingAPIKeyError:
+        # Should not fire here (resolver already ran), but if a downstream
+        # path raises it, propagate unchanged so the CLI's exit-12
+        # mapping covers it.
+        raise
+    except ConfigError:
+        # Should not fire here either (resolvers already ran), but if a
+        # downstream path raises it, propagate unchanged so the operator
+        # gets the typed error for diagnosis.
+        raise
+    except ReviewerAgentError:
+        # Already typed for the caller — pass through (no double-wrap).
+        raise
+    except Exception as e:
+        raise ReviewerAgentError(
+            f"reviewer agent SDK call failed: {e}"
+        ) from e
+
+    # --- Parse JSON via Story 4 helper. parse_agent_json raises
+    # ReviewerAgentError on JSON decode failure for role="reviewer";
+    # that propagates UNCHANGED (do NOT double-wrap).
+    parsed = parse_agent_json(raw, role="reviewer")
+
+    # --- Shape validation. Strict: dict with EXACTLY `approved` (bool)
+    # and `test_result` (str). Violations all raise ReviewerAgentError
+    # with a descriptive message naming the violation.
+    if not isinstance(parsed, dict):
+        raise ReviewerAgentError(
+            f"reviewer output must be a JSON object, got "
+            f"{type(parsed).__name__}"
+        )
+    if "approved" not in parsed:
+        raise ReviewerAgentError(
+            "reviewer output missing required key 'approved'"
+        )
+    if "test_result" not in parsed:
+        raise ReviewerAgentError(
+            "reviewer output missing required key 'test_result'"
+        )
+    # Strict bool check — reject int 0/1. `True == 1` and
+    # `isinstance(True, int)` in Python, so `isinstance(x, bool)` would
+    # accept int subclasses that aren't bool. `type(x) is bool` is the
+    # tight check.
+    if type(parsed["approved"]) is not bool:
+        raise ReviewerAgentError(
+            f"reviewer output 'approved' must be bool, got "
+            f"{type(parsed['approved']).__name__}"
+        )
+    if not isinstance(parsed["test_result"], str):
+        raise ReviewerAgentError(
+            f"reviewer output 'test_result' must be str, got "
+            f"{type(parsed['test_result']).__name__}"
+        )
+    extras = set(parsed.keys()) - {"approved", "test_result"}
+    if extras:
+        raise ReviewerAgentError(
+            f"reviewer output has unexpected keys: {sorted(extras)}"
+        )
+
+    return parsed
+
+
 def decompose(spawn_agent: Optional[Callable] = None) -> dict:
     """Spawn an SM Agent (or an injected stub) to decompose the active
     iteration's requirements into a sequence of stories, then write a single
@@ -2477,22 +2626,15 @@ def execute(
             * Post-spawn partial failures leave already-written entries in
               place (truthful audit trail).
     """
-    # --- Default-spawn check FIRST (before any type / state validation).
-    # Iter 2 Stories 7 + 8 inverted spawn_test_writer's AND spawn_coder's
+    # --- Default-spawn binding FIRST (before any type / state validation).
+    # Iter 2 Stories 7 + 8 + 9 inverted ALL THREE spawn callables'
     # defaults: None now routes to the real
     # `_default_execute_test_writer_spawn` / `_default_execute_coder_spawn`
-    # (both resolved at call time via sys.modules so monkeypatches take
-    # effect). spawn_reviewer remains `None`-defaults-to-
-    # NotImplementedError until Story 9 ships. NotImplementedError must
-    # fire regardless of state, so callers exploring "what happens if I
-    # just call execute()" get the right signal without leaking log
-    # entries.
-    if spawn_reviewer is None:
-        raise NotImplementedError(
-            "real agent integration ships in Iter 2 — pass "
-            "spawn_reviewer for testing/manual ops "
-            "(reviewer ships in Story 9)"
-        )
+    # / `_default_execute_reviewer_spawn` (all resolved at call time via
+    # sys.modules so monkeypatches take effect). The Iter-1-era
+    # NotImplementedError gate is gone — Story 9 closed the last
+    # linchpin. With no API key configured, the real defaults raise
+    # MissingAPIKeyError on first call (the CLI maps that to exit 12).
     import sys as _sys
     if spawn_test_writer is None:
         # Iter 2 Story 7: fall back to the real default. Bind from the
@@ -2507,6 +2649,13 @@ def execute(
         # "_default_execute_coder_spawn", ...)`) take effect.
         spawn_coder = (
             _sys.modules[__name__]._default_execute_coder_spawn
+        )
+    if spawn_reviewer is None:
+        # Iter 2 Story 9: fall back to the real default. Bind from the
+        # module so monkeypatches in tests (`monkeypatch.setattr(sm,
+        # "_default_execute_reviewer_spawn", ...)`) take effect.
+        spawn_reviewer = (
+            _sys.modules[__name__]._default_execute_reviewer_spawn
         )
 
     # --- Type validation: story_id must be str (before any state read). ---
