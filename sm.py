@@ -2943,18 +2943,38 @@ EXIT_AGENT_ERROR = 12
 _HELP_TEXT = """\
 usage: python -m sm <command> [args...]
 
-Commands:
-  ingest <path>    Ingest a PO Tool iteration_open handoff JSON file.
+Read-only commands:
+  status                                  Show active iteration / backlog state.
 
-Exit codes (return codes) for `ingest`:
-  0  success
-  1  unexpected / other error
-  2  path error           (file not found, path is a directory)
-  3  JSON parse error     (malformed or empty handoff JSON)
-  4  shape error          (handoff missing/wrong-typed fields, bad reqs)
-  5  duplicate iteration_id (id was used by a prior iteration_open,
-                             open or closed)
-  6  single-active-iteration violation (another iteration is open)
+Mutating commands:
+  ingest <path>                           Ingest a PO Tool iteration_open JSON.
+  decompose                               Decompose requirements into stories.
+  sprint-cut <N>                          Cut backlog at index N (sprint commit).
+  start <story_id>                        Move story -> in_progress.
+  submit <story_id>                       Move story -> in_review.
+  record-review <id> --approved <bool> --test-result <text>
+                                          Record reviewer decision.
+  accept <story_id>                       Move story -> accepted.
+  reject <story_id>                       Move story -> rejected.
+  execute <story_id>                      Run TestWriter->Coder->Reviewer pipeline.
+
+Terminal commands:
+  close                                   Close iteration (validation gate).
+  force-close --reason <text>             Force-close iteration (escape valve).
+
+Exit codes:
+  0   success
+  1   unexpected / other error
+  2   path error (file not found, path is a directory)
+  3   JSON parse error (malformed or empty JSON)
+  4   shape error (handoff or output missing/wrong-typed fields)
+  5   duplicate iteration_id
+  6   single-active-iteration violation
+  7   unknown requirement reference (decompose)
+  8   sprint-cut validation failure
+  9   story transition / review failure
+  11  iteration close validation failure
+  12  agent error (missing ANTHROPIC_API_KEY, SDK auth, etc.)
 """
 
 
