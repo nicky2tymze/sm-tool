@@ -880,29 +880,31 @@ def build_entry(type: str, content: dict) -> dict:
     return result
 
 
-def derive_state() -> dict:
-    """Replay the full event log and return the derived current state.
+def _derive_state_full() -> tuple:
+    """Iter 2 Story 11 — single-pass log replay primitive.
 
-    Pure read: log bytes are not modified, no sidecar files written. Two
-    consecutive calls produce equal (and independent) results.
+    Walks the event log ONCE and returns a tuple:
 
-    Returns a dict with five top-level keys:
-      - active_iteration: dict {iteration_id, requirements: [...]} or None
-      - story_backlog:    list[dict] of story records, ordered by `sequence`
-      - sprint_cut:       int or None (latest sprint_cut entry wins)
-      - story_states:     dict {story_id: state} where state is one of
-                          {planned, in_progress, in_review, accepted,
-                           rejected, force_closed}
-      - close_status:     dict {closed_by, reason, accepted_count,
-                          rejected_count, force_closed_count} or None
-                          (cleared to None on a new iteration_open)
+        (state, seen_iteration_ids, latest_in_sprint_story_ids)
 
-    Raises ValueError naming the offending entry id when:
-      - a state_change targets an unknown story_id
-      - a state_change is an illegal lifecycle transition
-      - a second iteration_open lands with no intervening iteration_close
+    where:
+      - ``state`` is the same six-key dict that public ``derive_state()``
+        returns (the original five keys plus ``iteration_goal``).
+      - ``seen_iteration_ids`` is the set of every ``iteration_id`` from
+        every ``iteration_open`` entry encountered during replay
+        (including ones that have since been closed). ``ingest()``'s
+        duplicate-id check consumes this set.
+      - ``latest_in_sprint_story_ids`` is the ``in_sprint_story_ids`` list
+        from the LATEST ``sprint_cut`` entry encountered (or ``[]`` if no
+        sprint_cut has been written). ``close_iteration()`` consumes this
+        list so it doesn't need a second walk just to recover it.
 
-    Unknown entry types are no-ops (forward-compatibility).
+    This is the canonical primitive after Story 11 — callers that need
+    only the state dict go through the public ``derive_state()`` wrapper,
+    which drops the other two values on the floor. Callers that ALSO
+    need ``seen_iteration_ids`` (ingest) or ``latest_in_sprint_story_ids``
+    (close_iteration) call this helper directly so a single walk feeds
+    everything. PRIVATE; not in __all__.
     """
     state: dict = {
         "active_iteration": None,
@@ -910,7 +912,18 @@ def derive_state() -> dict:
         "sprint_cut": None,
         "story_states": {},
         "close_status": None,
+        "iteration_goal": None,
     }
+
+    # Iter 2 Story 11 retro item 7: also collect every iteration_id from
+    # every iteration_open entry encountered. ingest()'s dup-id check
+    # consumes this set instead of doing a second walk.
+    seen_iteration_ids: set = set()
+
+    # Iter 2 Story 11: the LATEST sprint_cut entry's in_sprint_story_ids,
+    # so close_iteration can read it from the same walk instead of doing
+    # a second one. Initialized to [] (no sprint_cut written yet).
+    latest_in_sprint_story_ids: list = []
 
     # Iter 2 Story 6: track whether a story_backlog has been written
     # for the currently-active iteration. A subsequent `iteration_open`
@@ -939,11 +952,23 @@ def derive_state() -> dict:
                 "iteration_id": entry.get("iteration_id"),
                 "requirements": list(entry.get("requirements", [])),
             }
+            # Iter 2 Story 11 retro item 10: derive_state now carries
+            # iteration_goal alongside active_iteration. Populated from
+            # the iteration_open entry verbatim — no coercion. Reset to
+            # None on iteration_close (mirroring active_iteration's
+            # lifecycle).
+            state["iteration_goal"] = entry.get("iteration_goal")
             state["close_status"] = None  # clear on new open
             _decomposed_since_open = False
 
+            # Track for ingest's dup-id check.
+            iid = entry.get("iteration_id")
+            if iid is not None:
+                seen_iteration_ids.add(iid)
+
         elif etype == "iteration_close":
             state["active_iteration"] = None
+            state["iteration_goal"] = None  # reset on close
             state["close_status"] = {
                 "closed_by": entry.get("closed_by"),
                 "reason": entry.get("reason"),
@@ -970,6 +995,13 @@ def derive_state() -> dict:
 
         elif etype == "sprint_cut":
             state["sprint_cut"] = entry.get("cut_position")
+            # Track the latest sprint_cut entry's in_sprint_story_ids so
+            # close_iteration can read it without a second walk. We
+            # intentionally do NOT promote this onto the public state
+            # dict — close_iteration consumes it via _derive_state_full.
+            latest_in_sprint_story_ids = list(
+                entry.get("in_sprint_story_ids", []) or []
+            )
 
         elif etype == "story_state_change":
             sid = entry.get("story_id")
@@ -990,6 +1022,44 @@ def derive_state() -> dict:
 
         # Unknown entry types: no-op (forward-compat).
 
+    return state, seen_iteration_ids, latest_in_sprint_story_ids
+
+
+def derive_state() -> dict:
+    """Replay the full event log and return the derived current state.
+
+    Pure read: log bytes are not modified, no sidecar files written. Two
+    consecutive calls produce equal (and independent) results.
+
+    Returns a dict with six top-level keys:
+      - active_iteration: dict {iteration_id, requirements: [...]} or None
+      - story_backlog:    list[dict] of story records, ordered by `sequence`
+      - sprint_cut:       int or None (latest sprint_cut entry wins)
+      - story_states:     dict {story_id: state} where state is one of
+                          {planned, in_progress, in_review, accepted,
+                           rejected, force_closed}
+      - close_status:     dict {closed_by, reason, accepted_count,
+                          rejected_count, force_closed_count} or None
+                          (cleared to None on a new iteration_open)
+      - iteration_goal:   str or None — the active iteration's goal,
+                          populated from the iteration_open entry. None
+                          when no iteration is open (mirrors the
+                          active_iteration None convention). Added in
+                          Iter 2 Story 11 (retro item 10) so callers
+                          like close_iteration don't re-scan the log
+                          just to recover it.
+
+    Raises ValueError naming the offending entry id when:
+      - a state_change targets an unknown story_id
+      - a state_change is an illegal lifecycle transition
+      - a second iteration_open lands with no intervening iteration_close
+
+    Unknown entry types are no-ops (forward-compatibility).
+    """
+    # Thin wrapper around the single-pass primitive. Drops the
+    # seen_iteration_ids and latest_in_sprint_story_ids tuple slots —
+    # those are internal-only and not part of the public state shape.
+    state, _seen, _in_sprint = _derive_state_full()
     return state
 
 
@@ -1084,12 +1154,19 @@ def ingest(path) -> dict:
             )
         seen_ids[rid] = i
 
-    # --- Single-active-iteration enforcement (via derive_state).
+    # --- Single-pass log replay (Iter 2 Story 11 retro item 7).
+    # The log is walked exactly once via `_derive_state_full`, which
+    # returns both the derived state (for the single-active check) and
+    # the set of every prior iteration_open id (for the dup-id check).
+    # Pre-Story-11 this was two walks: derive_state() + a second
+    # read_entries loop. Now it is one. Pure read; no log write.
+    state, seen_iteration_ids, _in_sprint = _derive_state_full()
+
+    # --- Single-active-iteration enforcement.
     # Story 7 precedence: this check fires BEFORE the dup-id check. When
     # both would fire (i.e., the new handoff's iteration_id matches the
     # currently-open iteration), the operator gets the actionable
     # "close it first" message rather than the cosmetic dup-id one.
-    state = derive_state()
     if state["active_iteration"] is not None:
         open_id = state["active_iteration"]["iteration_id"]
         raise IngestActiveError(
@@ -1098,17 +1175,16 @@ def ingest(path) -> dict:
         )
 
     # --- Duplicate iteration_id check (Story 6).
-    # Scan ALL prior `iteration_open` entries — including ones that have
-    # since been closed or force-closed. With Story 7's precedence flip,
-    # this only fires when nothing is currently open AND the new id was
-    # used by a prior (now-closed) iteration. Pure read of the log; no write.
-    for prior in read_entries():
-        if (prior.get("type") == "iteration_open"
-                and prior.get("iteration_id") == iter_id):
-            raise IngestDuplicateError(
-                f"cannot ingest: iteration_id {iter_id!r} was already "
-                f"used by a prior iteration_open entry"
-            )
+    # `seen_iteration_ids` is every iteration_id from every iteration_open
+    # entry encountered during the single walk above — including ones
+    # that have since been closed or force-closed. With Story 7's
+    # precedence flip, this only fires when nothing is currently open
+    # AND the new id was used by a prior (now-closed) iteration.
+    if iter_id in seen_iteration_ids:
+        raise IngestDuplicateError(
+            f"cannot ingest: iteration_id {iter_id!r} was already "
+            f"used by a prior iteration_open entry"
+        )
 
     # --- All validation passed; build + append ---
     entry = build_entry("iteration_open", handoff)
@@ -2282,8 +2358,13 @@ def close_iteration(
         `close_iteration(closed_by="force-close", reason="<text>")` without
         breaking change.
     """
-    # --- Replay state (pure read; no log write). ---
-    state = derive_state()
+    # --- Single-pass replay (Iter 2 Story 11).
+    # `_derive_state_full` walks the log exactly once and returns the
+    # state dict (now carrying `iteration_goal`, retro item 10) plus the
+    # latest sprint_cut's in_sprint_story_ids. close_iteration no longer
+    # makes a second log-read pass — both values come from the one walk
+    # that derive_state already needed.
+    state, _seen, in_sprint_ids = _derive_state_full()
 
     # --- Validation cascade ---
     if state["active_iteration"] is None:
@@ -2304,18 +2385,10 @@ def close_iteration(
             "iteration"
         )
 
-    # --- Find the LATEST sprint_cut entry's in_sprint_story_ids, plus the
-    # iteration_goal from the matching iteration_open entry. derive_state
-    # doesn't carry either, so do one targeted log scan.
+    # iteration_goal comes from the state object (retro item 10) — no
+    # separate log scan. iteration_id comes from active_iteration.
     iteration_id = state["active_iteration"].get("iteration_id")
-    in_sprint_ids: list = []
-    iteration_goal: Optional[str] = None
-    for entry in read_entries():
-        etype = entry.get("type")
-        if etype == "iteration_open" and entry.get("iteration_id") == iteration_id:
-            iteration_goal = entry.get("iteration_goal")
-        elif etype == "sprint_cut":
-            in_sprint_ids = entry.get("in_sprint_story_ids", []) or []
+    iteration_goal: Optional[str] = state["iteration_goal"]
 
     # --- Gate: every in-sprint story must be in a terminal state. ---
     story_states = state["story_states"]
