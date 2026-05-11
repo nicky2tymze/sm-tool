@@ -45,9 +45,14 @@ __all__ = [
     "resolve_role_spec",
     "RoleSpecNotFoundError",
     "decompose",
+    "DecomposeAgentError",
     "DecomposeOutputParseError",
     "DecomposeOutputShapeError",
     "DecomposeUnknownRequirementError",
+    "TestWriterAgentError",
+    "CoderAgentError",
+    "ReviewerAgentError",
+    "parse_agent_json",
     "sprint_cut",
     "SprintCutError",
     "SprintCutLockedError",
@@ -114,15 +119,38 @@ class RoleSpecNotFoundError(FileNotFoundError):
 # (JSON parsed but doesn't match the required schema).
 # ---------------------------------------------------------------------------
 
-class DecomposeAgentError(RuntimeError):
-    """Raised when spawn_agent itself errors and the failure should be
-    surfaced as a typed decompose-domain exception. Currently unused by the
-    happy-path implementation (which lets the agent's exception propagate
-    verbatim); reserved for future wrapping behavior."""
+class DecomposeAgentError(ValueError):
+    """Raised when the decompose agent spawn fails or returns malformed
+    output. Iter 2 Story 4 rebased this from RuntimeError to ValueError so
+    the four per-role agent-error classes share a uniform hierarchy and
+    existing `except ValueError` handlers keep working. `parse_agent_json`
+    raises this class on json.loads failures for role="decompose"."""
 
 
-class DecomposeOutputParseError(ValueError):
-    """The agent returned output that is not valid JSON."""
+class TestWriterAgentError(ValueError):
+    """Raised when the test_writer agent spawn fails or returns malformed
+    output. Iter 2 Story 4: typed parse error for `parse_agent_json` when
+    called with role="test_writer"."""
+
+
+class CoderAgentError(ValueError):
+    """Raised when the coder agent spawn fails or returns malformed
+    output. Iter 2 Story 4: typed parse error for `parse_agent_json` when
+    called with role="coder"."""
+
+
+class ReviewerAgentError(ValueError):
+    """Raised when the reviewer agent spawn fails or returns malformed
+    output. Iter 2 Story 4: typed parse error for `parse_agent_json` when
+    called with role="reviewer"."""
+
+
+class DecomposeOutputParseError(DecomposeAgentError):
+    """The agent returned output that is not valid JSON. Iter 2 Story 4
+    rebased the parent class from ValueError to DecomposeAgentError so
+    parse failures route uniformly through the shared agent-error
+    hierarchy; ValueError catch paths still work because
+    DecomposeAgentError -> ValueError."""
 
 
 class DecomposeOutputShapeError(ValueError):
@@ -137,6 +165,73 @@ class DecomposeUnknownRequirementError(ValueError):
     `DecomposeOutputShapeError` — both subclass ValueError so existing
     `except ValueError` callers keep working, but callers can branch on
     the exact class for cross-reference vs shape failures."""
+
+
+# ---------------------------------------------------------------------------
+# Iter 2 Story 4 — JSON ask-and-parse helper with typed parse errors.
+#
+# Single-source-of-truth: every spawn default routes agent-response JSON
+# through this helper. `json.loads` of agent text happens exactly once
+# (here); on parse failure the helper raises the role's typed error class
+# carrying the role name and a truncated raw snippet (≤200 chars).
+# ---------------------------------------------------------------------------
+
+_PARSE_ROLE_TO_ERROR = {
+    "decompose": DecomposeAgentError,
+    "test_writer": TestWriterAgentError,
+    "coder": CoderAgentError,
+    "reviewer": ReviewerAgentError,
+}
+_VALID_PARSE_ROLES = frozenset(_PARSE_ROLE_TO_ERROR.keys())
+_PARSE_SNIPPET_LIMIT = 200
+
+
+def parse_agent_json(raw, role):
+    """Parse an agent response string and return the resulting dict or list.
+
+    On `json.JSONDecodeError`, raises the role's typed parse-error class
+    (a `ValueError` subclass) carrying the role name, the underlying
+    decoder message, and a snippet of `raw` truncated to the first 200
+    characters.
+
+    Args:
+        raw: The agent's raw response text. Must be a `str`.
+        role: One of "decompose", "test_writer", "coder", "reviewer".
+
+    Returns:
+        The parsed JSON object (dict or list).
+
+    Raises:
+        TypeError: if `raw` is not a string.
+        ValueError: if `role` is not one of the four canonical roles
+            (this includes non-string `role` values).
+        DecomposeAgentError / TestWriterAgentError / CoderAgentError /
+        ReviewerAgentError: if `raw` is not valid JSON.
+    """
+    # Type guard on raw — the helper is documented as a string helper.
+    if not isinstance(raw, str):
+        raise TypeError(
+            f"raw must be a string, got {type(raw).__name__}"
+        )
+    # Role argument validation. Non-string and unknown-string both fail
+    # as ValueError; the message enumerates the four valid roles so the
+    # operator can self-correct.
+    if not isinstance(role, str) or role not in _VALID_PARSE_ROLES:
+        valid = sorted(_VALID_PARSE_ROLES)
+        raise ValueError(
+            f"unknown role {role!r}; valid roles are "
+            f"{valid!r} (one of: decompose, test_writer, coder, reviewer)"
+        )
+
+    err_class = _PARSE_ROLE_TO_ERROR[role]
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as e:
+        snippet = raw[:_PARSE_SNIPPET_LIMIT]
+        raise err_class(
+            f"{role} agent returned unparseable JSON: {e}; "
+            f"raw[:{_PARSE_SNIPPET_LIMIT}]={snippet!r}"
+        ) from e
 
 
 # ---------------------------------------------------------------------------
@@ -961,10 +1056,18 @@ def decompose(spawn_agent: Optional[Callable] = None) -> dict:
     # callable raises propagates verbatim (no log write).
     output_str = spawn_agent(str(role_spec_path), requirements)
 
-    # --- Parse JSON ---
+    # --- Parse JSON (Story 4: route through shared helper) ---
+    # `parse_agent_json` is the single source of truth for agent-response
+    # JSON parsing. On parse failure it raises `DecomposeAgentError`; we
+    # re-raise as `DecomposeOutputParseError` (now a subclass of
+    # DecomposeAgentError) so Iter 1's parse-error contract is preserved.
+    # A non-string from `spawn_agent` (helper raises TypeError) is treated
+    # the same way — a malformed agent return shape.
     try:
-        output = json.loads(output_str)
-    except (json.JSONDecodeError, TypeError) as e:
+        output = parse_agent_json(output_str, "decompose")
+    except DecomposeAgentError as e:
+        raise DecomposeOutputParseError(str(e)) from e.__cause__
+    except TypeError as e:
         raise DecomposeOutputParseError(
             f"agent output is not valid JSON: {e}"
         ) from e
