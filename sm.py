@@ -1270,6 +1270,90 @@ def _default_execute_test_writer_spawn(
         ) from e
 
 
+# ---------------------------------------------------------------------------
+# Iter 2 Story 8 — real `spawn_coder` default for `execute`.
+#
+# `_default_execute_coder_spawn` is the real (non-injected) spawn-agent the
+# `execute` function falls back to for the Coder stage when no callable is
+# injected. Mirrors Story 7's `_default_execute_test_writer_spawn` shape
+# with three deltas:
+#   - signature is `(role_spec_path: str, story: dict, test_code: str) -> str`
+#     per Iter 1 Story 23's injectable contract (Coder takes test_code)
+#   - role is "coder" (drives resolve_model / resolve_max_tokens)
+#   - user message bundles role-spec text + story dict (as JSON) + test_code
+#     + an instruction to return implementation code
+#   - SDK exceptions wrap as `CoderAgentError` with `__cause__` chained;
+#     MissingAPIKeyError AND ConfigError propagate UNCHANGED
+#
+# Returns the SDK response VERBATIM — Coder returns implementation code,
+# not JSON, so the default does NOT route through `parse_agent_json`.
+#
+# PRIVATE; NOT in __all__.
+# ---------------------------------------------------------------------------
+
+def _default_execute_coder_spawn(
+    role_spec_path: str,
+    story: dict,
+    test_code: str,
+) -> str:
+    """Default spawn_coder for `execute` — calls the real Anthropic SDK.
+
+    Composes Story 2 (resolve_api_key) + Story 3 (resolve_model,
+    resolve_max_tokens) + role-spec file read + Story 5
+    (_invoke_anthropic) into one SDK round-trip. SDK exceptions wrap as
+    `CoderAgentError` with `__cause__` chained; MissingAPIKeyError and
+    ConfigError propagate unchanged so the CLI maps MissingAPIKeyError
+    to exit 12 and ConfigError stays diagnosable.
+
+    Signature matches the injectable contract pinned by Iter 1 Story 23.
+    The returned string is the SDK response VERBATIM — Coder returns
+    implementation code, not JSON, so no parse_agent_json call.
+    """
+    # Resolve at call time so env-var overrides are honored every call.
+    api_key = resolve_api_key()  # raises MissingAPIKeyError if unset
+    model = resolve_model("coder")
+    max_tokens = resolve_max_tokens("coder")
+
+    # Read the role-spec file the caller already resolved. Any OS error
+    # (FileNotFoundError, PermissionError) propagates verbatim — the
+    # caller decides whether to wrap. Mirrors Story 7's decision.
+    role_spec_text = Path(role_spec_path).read_text(encoding="utf-8")
+
+    # Single user-role message bundling role-spec + story dict (as JSON)
+    # + test_code + instruction to return implementation code. Exact
+    # framing left to the Coder; tests pin that all pieces appear in the
+    # message content.
+    user_content = (
+        f"{role_spec_text}\n\n"
+        f"## Active story\n\n"
+        f"{json.dumps(story, indent=2)}\n\n"
+        f"## Test code to implement against\n\n"
+        f"{test_code}\n\n"
+        f"Return the implementation code per the role spec."
+    )
+    messages = [{"role": "user", "content": user_content}]
+
+    try:
+        return _invoke_anthropic(messages, model, max_tokens, api_key)
+    except MissingAPIKeyError:
+        # Should not fire here (resolver already ran), but if a downstream
+        # path raises it, propagate unchanged so the CLI's exit-12
+        # mapping covers it.
+        raise
+    except ConfigError:
+        # Should not fire here either (resolvers already ran), but if a
+        # downstream path raises it, propagate unchanged so the operator
+        # gets the typed error for diagnosis.
+        raise
+    except CoderAgentError:
+        # Already typed for the caller — pass through.
+        raise
+    except Exception as e:
+        raise CoderAgentError(
+            f"coder agent SDK call failed: {e}"
+        ) from e
+
+
 def decompose(spawn_agent: Optional[Callable] = None) -> dict:
     """Spawn an SM Agent (or an injected stub) to decompose the active
     iteration's requirements into a sequence of stories, then write a single
@@ -2394,26 +2478,35 @@ def execute(
               place (truthful audit trail).
     """
     # --- Default-spawn check FIRST (before any type / state validation).
-    # Iter 2 Story 7 inverted spawn_test_writer's default: None now routes
-    # to the real `_default_execute_test_writer_spawn` (resolved at call
-    # time via sys.modules so monkeypatches take effect). spawn_coder and
-    # spawn_reviewer remain `None`-defaults-to-NotImplementedError until
-    # Stories 8 and 9 ship. NotImplementedError must fire regardless of
-    # state, so callers exploring "what happens if I just call execute()"
-    # get the right signal without leaking log entries.
-    if spawn_coder is None or spawn_reviewer is None:
+    # Iter 2 Stories 7 + 8 inverted spawn_test_writer's AND spawn_coder's
+    # defaults: None now routes to the real
+    # `_default_execute_test_writer_spawn` / `_default_execute_coder_spawn`
+    # (both resolved at call time via sys.modules so monkeypatches take
+    # effect). spawn_reviewer remains `None`-defaults-to-
+    # NotImplementedError until Story 9 ships. NotImplementedError must
+    # fire regardless of state, so callers exploring "what happens if I
+    # just call execute()" get the right signal without leaking log
+    # entries.
+    if spawn_reviewer is None:
         raise NotImplementedError(
             "real agent integration ships in Iter 2 — pass "
-            "spawn_coder / spawn_reviewer for testing/manual ops "
-            "(coder ships in Story 8, reviewer in Story 9)"
+            "spawn_reviewer for testing/manual ops "
+            "(reviewer ships in Story 9)"
         )
+    import sys as _sys
     if spawn_test_writer is None:
         # Iter 2 Story 7: fall back to the real default. Bind from the
         # module so monkeypatches in tests (`monkeypatch.setattr(sm,
         # "_default_execute_test_writer_spawn", ...)`) take effect.
-        import sys as _sys
         spawn_test_writer = (
             _sys.modules[__name__]._default_execute_test_writer_spawn
+        )
+    if spawn_coder is None:
+        # Iter 2 Story 8: fall back to the real default. Bind from the
+        # module so monkeypatches in tests (`monkeypatch.setattr(sm,
+        # "_default_execute_coder_spawn", ...)`) take effect.
+        spawn_coder = (
+            _sys.modules[__name__]._default_execute_coder_spawn
         )
 
     # --- Type validation: story_id must be str (before any state read). ---

@@ -1418,15 +1418,29 @@ def test_test_writer_explicit_none_no_longer_raises_not_implemented(
 
 def test_coder_still_raises_not_implemented_under_story_7(
         isolated_log, api_key_env, clean_resolver_env, monkeypatch):
-    """spawn_coder=None STILL raises NotImplementedError under Story 7 —
-    Stories 8 wires coder; until then, coder=None is unimplemented."""
+    """spawn_coder=None no longer raises NotImplementedError under
+    Story 8 — Story 8 wired the real coder default.
+
+    Iter 2 Story 8 inverted spawn_coder's default: None now routes
+    to the real `_default_execute_coder_spawn`. Under Story 7 this
+    test pinned the OLD NotImplementedError path; Story 8 resolves
+    the cascade per the established behavior-preserving update
+    pattern. With api_key_env set and fake SDK installed, the call
+    now succeeds end-to-end (test_writer default + coder default
+    both fire).
+    """
     import sm
     _, in_sprint, _ = _seed_sprint()
     _install_fake_anthropic(monkeypatch)
-    with pytest.raises(NotImplementedError):
+    try:
         sm.execute(in_sprint[0],
                    spawn_coder=None,
                    spawn_reviewer=_make_reviewer())
+    except NotImplementedError as e:
+        pytest.fail(
+            f"Story 8: explicit spawn_coder=None must fall through to "
+            f"real default, not raise NotImplementedError; got: {e!s}"
+        )
 
 
 def test_reviewer_still_raises_not_implemented_under_story_7(

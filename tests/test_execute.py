@@ -463,11 +463,21 @@ def test_default_only_test_writer_missing_raises(isolated_log, monkeypatch):
                    spawn_reviewer=_make_reviewer())
 
 
-def test_default_only_coder_missing_raises(isolated_log):
-    """spawn_coder=None (others provided) -> NotImplementedError."""
+def test_default_only_coder_missing_raises(isolated_log, monkeypatch):
+    """spawn_coder=None (others provided) -> MissingAPIKeyError.
+
+    Iter 2 Story 8 inverted spawn_coder's default: None now routes
+    to the real `_default_execute_coder_spawn`. With no
+    ANTHROPIC_API_KEY set (the default state in this isolated fixture),
+    the real default raises MissingAPIKeyError instead of the old
+    NotImplementedError. Behavior-preserving update: the test intent
+    (default refuses silent run) is preserved; only the mechanism
+    changed per the established Iter 2 cascade pattern.
+    """
     import sm
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     _, in_sprint, _ = _seed_sprint()
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(sm.MissingAPIKeyError):
         sm.execute(in_sprint[0],
                    spawn_test_writer=_make_test_writer(),
                    spawn_coder=None,
