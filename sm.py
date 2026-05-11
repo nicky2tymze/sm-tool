@@ -45,6 +45,8 @@ _LIFECYCLE_TARGETS = {
 __all__ = [
     "LOG_PATH",
     "build_entry",
+    "make_materialized_file_entry",
+    "make_materialization_status_entry",
     "read_entries",
     "derive_state",
     "ingest",
@@ -1218,6 +1220,123 @@ def build_entry(type: str, content: dict) -> dict:
     for k, v in content.items():
         result[k] = v
     return result
+
+
+# ---------------------------------------------------------------------------
+# Iter 3 v2 Sprint 1 Story 5 — materialization entry-type factories.
+#
+# Two PUBLIC helpers that pin the canonical shape of the two new log entry
+# types introduced for req-2 (file materialization). Each factory validates
+# its inputs at the call site (so bad data fails immediately, not later on
+# replay) and returns the dict produced by `build_entry` with the new
+# entry-type strings and the payload fields merged at the top level. Both
+# round-trip through `_append_entry` / `read_entries` like any other entry.
+# ---------------------------------------------------------------------------
+
+_MATERIALIZED_FILE_ROLES = frozenset({"test_writer", "coder", "reviewer"})
+_MATERIALIZATION_STATUSES = frozenset({"materialized", "collision", "rejected"})
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def make_materialized_file_entry(
+    story_id: str,
+    role: str,
+    target_path: str,
+    byte_count: int,
+    sha256: str,
+) -> dict:
+    """Build a canonical `materialized_file` log entry.
+
+    Returns the dict produced by `build_entry("materialized_file", {...})`
+    with the five payload fields merged at the top level.
+
+    Validation (all raise `ValueError` naming the offending field):
+      - `story_id`: non-empty str.
+      - `role`: one of {"test_writer", "coder", "reviewer"}.
+      - `target_path`: non-empty str.
+      - `byte_count`: non-negative int.
+      - `sha256`: exactly 64 lowercase hex chars (`[0-9a-f]{64}`).
+    """
+    if not isinstance(story_id, str) or not story_id:
+        raise ValueError(
+            f"story_id must be a non-empty string, got {story_id!r}"
+        )
+    if role not in _MATERIALIZED_FILE_ROLES:
+        raise ValueError(
+            f"role must be one of "
+            f"{sorted(_MATERIALIZED_FILE_ROLES)!r}, got {role!r}"
+        )
+    if not isinstance(target_path, str) or not target_path:
+        raise ValueError(
+            f"target_path must be a non-empty string, got {target_path!r}"
+        )
+    # Reject bool explicitly (bool is an int subclass).
+    if isinstance(byte_count, bool) or not isinstance(byte_count, int):
+        raise ValueError(
+            f"byte_count must be a non-negative int, got "
+            f"{byte_count.__class__.__name__}"
+        )
+    if byte_count < 0:
+        raise ValueError(
+            f"byte_count must be a non-negative int, got {byte_count!r}"
+        )
+    if not isinstance(sha256, str) or not _SHA256_RE.match(sha256):
+        raise ValueError(
+            f"sha256 must be exactly 64 lowercase hex chars "
+            f"([0-9a-f]{{64}}), got {sha256!r}"
+        )
+
+    return build_entry(
+        "materialized_file",
+        {
+            "story_id": story_id,
+            "role": role,
+            "target_path": target_path,
+            "byte_count": byte_count,
+            "sha256": sha256,
+        },
+    )
+
+
+def make_materialization_status_entry(
+    story_id: str,
+    status: str,
+    reason: str,
+) -> dict:
+    """Build a canonical `materialization_status` log entry.
+
+    Returns the dict produced by
+    `build_entry("materialization_status", {...})` with the three payload
+    fields merged at the top level.
+
+    Validation (all raise `ValueError` naming the offending field):
+      - `story_id`: non-empty str.
+      - `status`: one of {"materialized", "collision", "rejected"}.
+      - `reason`: non-empty str (`reason` is the whole point of the entry —
+        replay observers must see WHY the status fired).
+    """
+    if not isinstance(story_id, str) or not story_id:
+        raise ValueError(
+            f"story_id must be a non-empty string, got {story_id!r}"
+        )
+    if status not in _MATERIALIZATION_STATUSES:
+        raise ValueError(
+            f"status must be one of "
+            f"{sorted(_MATERIALIZATION_STATUSES)!r}, got {status!r}"
+        )
+    if not isinstance(reason, str) or not reason:
+        raise ValueError(
+            f"reason must be a non-empty string, got {reason!r}"
+        )
+
+    return build_entry(
+        "materialization_status",
+        {
+            "story_id": story_id,
+            "status": status,
+            "reason": reason,
+        },
+    )
 
 
 def _derive_state_full() -> tuple:
