@@ -87,6 +87,8 @@ __all__ = [
     "resolve_model",
     "resolve_max_tokens",
     "ConfigError",
+    "resolve_context_mode",
+    "assemble_spawn_context",
 ]
 
 
@@ -615,6 +617,125 @@ def resolve_max_tokens(role: str) -> int:
         return _parse("SM_MAX_TOKENS", glob)
 
     return _DEFAULT_MAX_TOKENS
+
+
+# ---------------------------------------------------------------------------
+# Iter 3 v2 Sprint 1 Story 1 — codebase context resolver + bundler.
+#
+# `resolve_context_mode()` reads the `SM_CONTEXT_MODE` env var and returns
+# one of `"full"` / `"minimal"` / `"custom"`. Defaults to `"full"` when
+# the env var is unset / empty / whitespace-only (operator typo for
+# "unset", same pattern as `resolve_model`). Strict case-sensitive
+# comparison — any other value raises the existing `ConfigError`.
+#
+# `assemble_spawn_context(sm_path, test_files, schemas)` builds the
+# context dict that Story 2 (next sprint) will splice into the spawn
+# user message. All three args optional; each `None` argument means the
+# corresponding key is ABSENT from the returned dict (not present-with-
+# None). Empty `test_files` list is semantically equivalent to None for
+# output shape; empty `schemas` dict IS preserved (deliberate empty
+# choice). Returns a fresh dict each call so caller mutations don't
+# leak back.
+#
+# Story 1 builds the helpers only. Story 2 wires them into the four
+# spawn defaults. Single literal env-var read on this path — added to
+# the posture-audit allowlist in tests/test_posture_audit.py.
+# ---------------------------------------------------------------------------
+
+_VALID_CONTEXT_MODES: frozenset = frozenset({"full", "minimal", "custom"})
+
+
+def resolve_context_mode() -> str:
+    """Return the codebase-context mode for spawn message assembly.
+
+    Reads the `SM_CONTEXT_MODE` env var. Empty / whitespace-only / unset
+    falls through to the documented default `"full"` (Requirements v2
+    Req 1). Strict case-sensitive comparison: only lowercase `"full"`,
+    `"minimal"`, `"custom"` are accepted; anything else (including
+    `"FULL"`, `"Full"`, `"partial"`, `"ful"`, `"full minimal"`) raises
+    the typed `ConfigError` naming both the env var and the valid set
+    so the operator can correct.
+
+    Returns:
+        One of `"full"`, `"minimal"`, `"custom"`.
+
+    Raises:
+        ConfigError: A non-empty env-var value is not one of the three
+            accepted lowercase tokens.
+    """
+    import os as _os  # local import keeps the resolver stdlib-only
+
+    raw = _os.environ.get("SM_CONTEXT_MODE", "")
+    stripped = raw.strip() if raw else ""
+    if not stripped:
+        return "full"
+    if stripped in _VALID_CONTEXT_MODES:
+        return stripped
+    raise ConfigError(
+        f"SM_CONTEXT_MODE={raw!r} is not a valid context mode; "
+        f"accepted values are 'full', 'minimal', 'custom' "
+        f"(case-sensitive, lowercase)"
+    )
+
+
+def assemble_spawn_context(
+    sm_path=None,
+    test_files=None,
+    schemas=None,
+) -> dict:
+    """Assemble the codebase-context dict for a spawn user message.
+
+    All three arguments optional and default to `None`. Returns a fresh
+    dict each call (caller mutations do not leak back). The returned
+    dict carries ONLY the keys the caller asked for; a `None` argument
+    means the corresponding key is ABSENT (not present-with-None).
+
+    - `sm_path` (str | None): When provided, the file is read via UTF-8
+      and its full text is placed under the `"sm_content"` key. Missing
+      file raises `FileNotFoundError` (no swallow). `None` -> key
+      absent.
+    - `test_files` (list[str] | None): When a non-empty list, each path
+      is read via UTF-8 and a `{"path": str, "content": str}` dict is
+      appended to the `"test_snippets"` list in input order. Empty list
+      and `None` both yield key absent (TestWriter decision: empty
+      input = empty output = no key).
+    - `schemas` (dict | None): When a dict (including the empty dict
+      `{}`), the value is placed verbatim under the `"schemas"` key.
+      `None` -> key absent. Empty dict IS preserved so the caller can
+      distinguish "untouched" (None) from "intentionally empty" (`{}`).
+
+    Args:
+        sm_path: Optional path to the runner module whose source should
+            be bundled into the spawn message.
+        test_files: Optional list of test-file paths to bundle.
+        schemas: Optional dict of named schemas to bundle verbatim.
+
+    Returns:
+        A fresh dict with zero, one, two, or three of the keys
+        `sm_content`, `test_snippets`, `schemas` per the rules above.
+
+    Raises:
+        FileNotFoundError: `sm_path` was provided but the file does not
+            exist (propagated from `pathlib.Path.read_text`).
+    """
+    import pathlib as _pathlib  # local import keeps the helper stdlib-only
+
+    out: dict = {}
+
+    if sm_path is not None:
+        out["sm_content"] = _pathlib.Path(sm_path).read_text(encoding="utf-8")
+
+    if test_files:
+        snippets = []
+        for path in test_files:
+            content = _pathlib.Path(path).read_text(encoding="utf-8")
+            snippets.append({"path": path, "content": content})
+        out["test_snippets"] = snippets
+
+    if schemas is not None:
+        out["schemas"] = schemas
+
+    return out
 
 
 # Story 13 graph — exposes only the operator-driven transitions. The

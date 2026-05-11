@@ -249,6 +249,10 @@ _ALLOWED_ENV_VAR_READS = {
     # separately.
     "SM_MODEL",
     "SM_MAX_TOKENS",
+    # Iter 3 v2 Sprint 1 Story 1 — codebase-context mode resolver. Single
+    # literal `os.environ.get("SM_CONTEXT_MODE", "")` inside
+    # `resolve_context_mode`. Same cascade pattern as Iter 2 Stories 2/3.
+    "SM_CONTEXT_MODE",
 }
 
 
