@@ -738,6 +738,63 @@ def assemble_spawn_context(
     return out
 
 
+# ---------------------------------------------------------------------------
+# Iter 3 v2 Sprint 1 Story 2 — spawn-context message serializer.
+#
+# `_format_context_for_message` turns the dict returned by
+# `assemble_spawn_context` into a single human/LLM-readable string with
+# labeled subsections. Each key in the input dict surfaces as a `###`
+# sub-header (so a reviewing agent can grep / parse without parsing
+# JSON). Missing keys -> no subsection. Empty dict -> empty string.
+#
+# Pinned as a separate function (PRIVATE; NOT in __all__) for
+# testability + reuse across all four spawn defaults + easy update
+# when the bundle gains keys later.
+# ---------------------------------------------------------------------------
+
+def _format_context_for_message(context: dict) -> str:
+    """Serialize an `assemble_spawn_context` dict for inlining into a
+    spawn user message.
+
+    Each present key surfaces as a labeled `###` sub-header followed by
+    that key's content. Keys not in the dict produce no subsection.
+    An empty dict yields an empty string.
+
+    Args:
+        context: A dict shaped like `assemble_spawn_context`'s return
+            value. May contain any subset of `sm_content` (str),
+            `test_snippets` (list of `{"path", "content"}` dicts), and
+            `schemas` (dict).
+
+    Returns:
+        A single string with zero, one, two, or three labeled
+        subsections separated by blank lines. Never returns None.
+    """
+    sections: list = []
+
+    if "sm_content" in context:
+        sections.append(
+            "### sm.py source\n\n"
+            f"{context['sm_content']}"
+        )
+
+    if "test_snippets" in context:
+        lines = ["### Test patterns"]
+        for snippet in context["test_snippets"]:
+            path = snippet.get("path", "<unknown>")
+            content = snippet.get("content", "")
+            lines.append(f"\n- {path}:\n{content}")
+        sections.append("\n".join(lines))
+
+    if "schemas" in context:
+        sections.append(
+            "### Canonical entry-type schemas\n\n"
+            f"{json.dumps(context['schemas'], indent=2)}"
+        )
+
+    return "\n\n".join(sections)
+
+
 # Story 13 graph — exposes only the operator-driven transitions. The
 # force_closed transitions remain in `_VALID_TRANSITIONS` for derive_state
 # replay; Story 19 will own the writer.
@@ -1392,6 +1449,10 @@ def _default_decompose_spawn(
     api_key = resolve_api_key()  # raises MissingAPIKeyError if unset
     model = resolve_model("decompose")
     max_tokens = resolve_max_tokens("decompose")
+    # Iter 3 v2 Sprint 1 Story 2 — resolve context mode BEFORE building
+    # the user message. ConfigError propagates verbatim (no fake-client
+    # construction on bad env var).
+    context_mode = resolve_context_mode()
 
     # Read the role-spec file the caller already resolved. Any OS error
     # (FileNotFoundError, PermissionError) propagates verbatim — the
@@ -1400,12 +1461,27 @@ def _default_decompose_spawn(
     # and more debuggable contract for an operational misconfiguration.
     role_spec_text = Path(role_spec_path).read_text(encoding="utf-8")
 
-    # Single user-role message bundling role-spec + requirements (as
-    # JSON). Story 6 leaves exact framing to the Coder; tests pin that
-    # both pieces appear in the message content.
+    # Iter 3 v2 Sprint 1 Story 2 — assemble + format the codebase
+    # context block when mode is full/custom. Minimal mode bypasses the
+    # bundle build entirely (no assemble_spawn_context call).
+    if context_mode in ("full", "custom"):
+        context = assemble_spawn_context(sm_path="sm.py")
+        context_text = _format_context_for_message(context)
+        prefix = (
+            f"{role_spec_text}\n\n"
+            f"## Codebase context\n\n"
+            f"{context_text}\n\n"
+        )
+    else:  # "minimal"
+        prefix = f"{role_spec_text}\n\n"
+
+    # Single user-role message bundling role-spec + (optional) codebase
+    # context + requirements (as JSON). Story 6 leaves exact framing to
+    # the Coder; tests pin that both pieces appear in the message
+    # content.
     user_content = (
-        f"{role_spec_text}\n\n"
-        f"## Active iteration requirements\n\n"
+        prefix
+        + f"## Active iteration requirements\n\n"
         f"{json.dumps(requirements, indent=2)}\n\n"
         f"Return your story decomposition as a JSON object per the "
         f"role spec."
@@ -1472,18 +1548,37 @@ def _default_execute_test_writer_spawn(
     api_key = resolve_api_key()  # raises MissingAPIKeyError if unset
     model = resolve_model("test_writer")
     max_tokens = resolve_max_tokens("test_writer")
+    # Iter 3 v2 Sprint 1 Story 2 — resolve context mode BEFORE building
+    # the user message. ConfigError propagates verbatim (no fake-client
+    # construction on bad env var).
+    context_mode = resolve_context_mode()
 
     # Read the role-spec file the caller already resolved. Any OS error
     # (FileNotFoundError, PermissionError) propagates verbatim — the
     # caller decides whether to wrap. Mirrors Story 6's decision.
     role_spec_text = Path(role_spec_path).read_text(encoding="utf-8")
 
-    # Single user-role message bundling role-spec + story dict (as JSON)
-    # + instruction to return test code. Exact framing left to the
-    # Coder; tests pin that all pieces appear in the message content.
+    # Iter 3 v2 Sprint 1 Story 2 — assemble + format the codebase
+    # context block when mode is full/custom. Minimal mode bypasses the
+    # bundle build entirely (no assemble_spawn_context call).
+    if context_mode in ("full", "custom"):
+        context = assemble_spawn_context(sm_path="sm.py")
+        context_text = _format_context_for_message(context)
+        prefix = (
+            f"{role_spec_text}\n\n"
+            f"## Codebase context\n\n"
+            f"{context_text}\n\n"
+        )
+    else:  # "minimal"
+        prefix = f"{role_spec_text}\n\n"
+
+    # Single user-role message bundling role-spec + (optional) codebase
+    # context + story dict (as JSON) + instruction to return test code.
+    # Exact framing left to the Coder; tests pin that all pieces appear
+    # in the message content.
     user_content = (
-        f"{role_spec_text}\n\n"
-        f"## Active story\n\n"
+        prefix
+        + f"## Active story\n\n"
         f"{json.dumps(story, indent=2)}\n\n"
         f"Return the test code for this story per the role spec."
     )
@@ -1553,19 +1648,37 @@ def _default_execute_coder_spawn(
     api_key = resolve_api_key()  # raises MissingAPIKeyError if unset
     model = resolve_model("coder")
     max_tokens = resolve_max_tokens("coder")
+    # Iter 3 v2 Sprint 1 Story 2 — resolve context mode BEFORE building
+    # the user message. ConfigError propagates verbatim (no fake-client
+    # construction on bad env var).
+    context_mode = resolve_context_mode()
 
     # Read the role-spec file the caller already resolved. Any OS error
     # (FileNotFoundError, PermissionError) propagates verbatim — the
     # caller decides whether to wrap. Mirrors Story 7's decision.
     role_spec_text = Path(role_spec_path).read_text(encoding="utf-8")
 
-    # Single user-role message bundling role-spec + story dict (as JSON)
-    # + test_code + instruction to return implementation code. Exact
-    # framing left to the Coder; tests pin that all pieces appear in the
-    # message content.
+    # Iter 3 v2 Sprint 1 Story 2 — assemble + format the codebase
+    # context block when mode is full/custom. Minimal mode bypasses the
+    # bundle build entirely (no assemble_spawn_context call).
+    if context_mode in ("full", "custom"):
+        context = assemble_spawn_context(sm_path="sm.py")
+        context_text = _format_context_for_message(context)
+        prefix = (
+            f"{role_spec_text}\n\n"
+            f"## Codebase context\n\n"
+            f"{context_text}\n\n"
+        )
+    else:  # "minimal"
+        prefix = f"{role_spec_text}\n\n"
+
+    # Single user-role message bundling role-spec + (optional) codebase
+    # context + story dict (as JSON) + test_code + instruction to return
+    # implementation code. Exact framing left to the Coder; tests pin
+    # that all pieces appear in the message content.
     user_content = (
-        f"{role_spec_text}\n\n"
-        f"## Active story\n\n"
+        prefix
+        + f"## Active story\n\n"
         f"{json.dumps(story, indent=2)}\n\n"
         f"## Test code to implement against\n\n"
         f"{test_code}\n\n"
@@ -1656,19 +1769,38 @@ def _default_execute_reviewer_spawn(
     api_key = resolve_api_key()  # raises MissingAPIKeyError if unset
     model = resolve_model("reviewer")
     max_tokens = resolve_max_tokens("reviewer")
+    # Iter 3 v2 Sprint 1 Story 2 — resolve context mode BEFORE building
+    # the user message. ConfigError propagates verbatim (no fake-client
+    # construction on bad env var).
+    context_mode = resolve_context_mode()
 
     # Read the role-spec file the caller already resolved. Any OS error
     # (FileNotFoundError, PermissionError) propagates verbatim — the
     # caller decides whether to wrap. Mirrors Stories 6 / 7 / 8.
     role_spec_text = Path(role_spec_path).read_text(encoding="utf-8")
 
-    # Single user-role message bundling role-spec + story dict (as JSON)
-    # + test_code + impl_code + instruction to return a JSON verdict.
-    # Exact framing left to the Coder; tests pin that all four pieces
-    # appear in the message content.
+    # Iter 3 v2 Sprint 1 Story 2 — assemble + format the codebase
+    # context block when mode is full/custom. Minimal mode bypasses the
+    # bundle build entirely (no assemble_spawn_context call).
+    if context_mode in ("full", "custom"):
+        context = assemble_spawn_context(sm_path="sm.py")
+        context_text = _format_context_for_message(context)
+        prefix = (
+            f"{role_spec_text}\n\n"
+            f"## Codebase context\n\n"
+            f"{context_text}\n\n"
+        )
+    else:  # "minimal"
+        prefix = f"{role_spec_text}\n\n"
+
+    # Single user-role message bundling role-spec + (optional) codebase
+    # context + story dict (as JSON) + test_code + impl_code +
+    # instruction to return a JSON verdict. Exact framing left to the
+    # Coder; tests pin that all four pieces appear in the message
+    # content.
     user_content = (
-        f"{role_spec_text}\n\n"
-        f"## Story under review\n\n"
+        prefix
+        + f"## Story under review\n\n"
         f"{json.dumps(story, indent=2)}\n\n"
         f"## Test code\n\n"
         f"{test_code}\n\n"

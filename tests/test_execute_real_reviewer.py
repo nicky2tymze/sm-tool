@@ -350,8 +350,16 @@ def isolated_log(tmp_path, monkeypatch):
 @pytest.fixture
 def api_key_env(monkeypatch):
     """Set `ANTHROPIC_API_KEY` to a test value so `resolve_api_key()`
-    succeeds."""
+    succeeds.
+
+    Iter 3 v2 Sprint 1 Story 2 cascade: also pins
+    `SM_CONTEXT_MODE=minimal` so these pre-Story-2 tests, which assert
+    on the exact pre-Story-2 user-message framing, keep their existing
+    assertions valid after Story 2 wired the codebase-context block
+    into the spawn defaults' full-mode path.
+    """
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-key-12345")
+    monkeypatch.setenv("SM_CONTEXT_MODE", "minimal")
     return "sk-test-key-12345"
 
 
