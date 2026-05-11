@@ -604,6 +604,76 @@ _STORY_STATES: frozenset = frozenset({
 })
 
 
+# ---------------------------------------------------------------------------
+# Iter 2 Story 5 — provider seam: single Anthropic SDK invocation point.
+#
+# `_invoke_anthropic` is the ONLY place in this module that imports or
+# invokes the Anthropic SDK. All four real-agent spawn defaults
+# (decompose / test_writer / coder / reviewer) route their SDK calls
+# through this seam so that swapping providers later is a refactor, not
+# a rewrite. Private (leading underscore), NOT in __all__.
+#
+# Behavior:
+#   - Type-validates the four inputs BEFORE constructing the SDK client.
+#     `messages` non-list, `model`/`api_key` non-string, `max_tokens`
+#     non-int (or bool — int subclass, rejected explicitly) raise
+#     TypeError. This is the only behavioral wrapping the seam performs.
+#   - Lazy import: `import anthropic` lives inside the function body so
+#     `import sm` is SDK-free. Tests rely on this to inject a fake SDK.
+#   - Constructs `Anthropic(api_key=api_key)` on every call (no cache).
+#   - Calls `client.messages.create(model=..., max_tokens=...,
+#     messages=...)` and returns `response.content[0].text` verbatim.
+#   - SDK exceptions propagate AS-IS. Story 5 is SDK-shaped, not
+#     role-shaped; callers wrap into role-specific typed errors.
+# ---------------------------------------------------------------------------
+
+def _invoke_anthropic(
+    messages: list,
+    model: str,
+    max_tokens: int,
+    api_key: str,
+) -> str:
+    """Single Anthropic SDK invocation point — provider seam.
+
+    All four real-agent spawn defaults route their SDK calls through this
+    function. Inputs are type-validated before the SDK is constructed;
+    SDK exceptions propagate unchanged for callers to wrap.
+    """
+    # Type validation FIRST — before any SDK import / construction so a
+    # bad-typed call never reaches (or instantiates) the client.
+    if not isinstance(messages, list):
+        raise TypeError(
+            f"messages must be a list, got {type(messages).__name__}"
+        )
+    if not isinstance(model, str):
+        raise TypeError(
+            f"model must be a string, got {type(model).__name__}"
+        )
+    # `bool` is a subclass of `int` in Python; a bool max-token count is
+    # a caller bug, so reject it explicitly before the isinstance check.
+    if isinstance(max_tokens, bool) or not isinstance(max_tokens, int):
+        raise TypeError(
+            f"max_tokens must be an int, got {type(max_tokens).__name__}"
+        )
+    if not isinstance(api_key, str):
+        raise TypeError(
+            f"api_key must be a string, got {type(api_key).__name__}"
+        )
+
+    # Lazy import — NOT at module top level. Tests inject a fake
+    # `anthropic` module into sys.modules before the call; the import
+    # below finds the fake and never touches the real SDK.
+    import anthropic
+
+    client = anthropic.Anthropic(api_key=api_key)
+    response = client.messages.create(
+        model=model,
+        max_tokens=max_tokens,
+        messages=messages,
+    )
+    return response.content[0].text
+
+
 def resolve_role_spec(role: str) -> Path:
     """Resolve the absolute path to a canonical role-spec markdown file.
 

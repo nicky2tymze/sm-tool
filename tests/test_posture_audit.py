@@ -359,6 +359,12 @@ _ALLOWED_TOP_LEVEL_MODULES = {
     # tripping this audit). Add only stdlib modules that pose no posture risk.
     "re", "io", "collections", "itertools", "functools", "string",
     "enum", "dataclasses", "textwrap", "argparse",
+    # Iter 2 Story 5 — provider seam. `anthropic` is lazy-imported INSIDE
+    # `_invoke_anthropic` (the single SDK call site); this allow-listing
+    # is the deliberate posture review for that import. The grep audit in
+    # `tests/test_invoke_anthropic.py` pins that the import appears
+    # exactly once in sm.py and is not at module top level.
+    "anthropic",
 }
 
 
