@@ -753,7 +753,7 @@ def test_cli_sprint_cut_subcommand_still_known(tmp_path):
     """`python -m sm sprint-cut <N>` is still a recognized subcommand
     after Story 12 — Story 12 must not break the CLI surface."""
     env = os.environ.copy()
-    env["SM_LOG_PATH"] = str(tmp_path / "cli_log.jsonl")
+    env["SM_TEST_LOG_PATH"] = str(tmp_path / "cli_log.jsonl")
 
     result = subprocess.run(
         [sys.executable, "-m", "sm", "sprint-cut", "1"],
@@ -790,7 +790,7 @@ def test_cli_lock_failure_exits_nonzero(tmp_path):
         sm.LOG_PATH = orig_log
 
     env = os.environ.copy()
-    env["SM_LOG_PATH"] = str(log_path)
+    env["SM_TEST_LOG_PATH"] = str(log_path)
 
     result = subprocess.run(
         [sys.executable, "-m", "sm", "sprint-cut", "2"],
@@ -833,7 +833,7 @@ def test_cli_lock_failure_writes_nothing(tmp_path):
     bytes_before = log_path.read_bytes()
 
     env = os.environ.copy()
-    env["SM_LOG_PATH"] = str(log_path)
+    env["SM_TEST_LOG_PATH"] = str(log_path)
 
     result = subprocess.run(
         [sys.executable, "-m", "sm", "sprint-cut", "4"],
@@ -872,7 +872,7 @@ def test_cli_allowed_recut_still_exits_zero(tmp_path):
         sm.LOG_PATH = orig_log
 
     env = os.environ.copy()
-    env["SM_LOG_PATH"] = str(log_path)
+    env["SM_TEST_LOG_PATH"] = str(log_path)
 
     result = subprocess.run(
         [sys.executable, "-m", "sm", "sprint-cut", "4"],

@@ -1490,7 +1490,7 @@ def test_cli_decompose_with_mocked_sdk_exits_zero(tmp_path):
     seed_script.write_text(
         "import os, sys\n"
         f"sys.path.insert(0, {str(PACKAGE_DIR)!r})\n"
-        f"os.environ['SM_LOG_PATH'] = {str(log_path)!r}\n"
+        f"os.environ['SM_TEST_LOG_PATH'] = {str(log_path)!r}\n"
         "import sm\n"
         "from pathlib import Path\n"
         f"sm.LOG_PATH = Path({str(log_path)!r})\n"
@@ -1523,7 +1523,7 @@ def test_cli_decompose_with_mocked_sdk_exits_zero(tmp_path):
     custom_dir = _build_subprocess_sitecustomize(tmp_path, payload)
 
     env = os.environ.copy()
-    env["SM_LOG_PATH"] = str(log_path)
+    env["SM_TEST_LOG_PATH"] = str(log_path)
     env["ANTHROPIC_API_KEY"] = "sk-cli-test"
     env["PYTHONPATH"] = (
         str(custom_dir) + os.pathsep + env.get("PYTHONPATH", "")
@@ -1557,7 +1557,7 @@ def test_cli_decompose_with_mocked_sdk_persists_story_backlog(tmp_path):
     seed_script.write_text(
         "import os, sys\n"
         f"sys.path.insert(0, {str(PACKAGE_DIR)!r})\n"
-        f"os.environ['SM_LOG_PATH'] = {str(log_path)!r}\n"
+        f"os.environ['SM_TEST_LOG_PATH'] = {str(log_path)!r}\n"
         "import sm\n"
         "from pathlib import Path\n"
         f"sm.LOG_PATH = Path({str(log_path)!r})\n"
@@ -1587,7 +1587,7 @@ def test_cli_decompose_with_mocked_sdk_persists_story_backlog(tmp_path):
     custom_dir = _build_subprocess_sitecustomize(tmp_path, payload)
 
     env = os.environ.copy()
-    env["SM_LOG_PATH"] = str(log_path)
+    env["SM_TEST_LOG_PATH"] = str(log_path)
     env["ANTHROPIC_API_KEY"] = "sk-cli-test-2"
     env["PYTHONPATH"] = (
         str(custom_dir) + os.pathsep + env.get("PYTHONPATH", "")
@@ -1630,7 +1630,7 @@ def test_cli_decompose_missing_key_exits_twelve(tmp_path):
     seed_script.write_text(
         "import os, sys\n"
         f"sys.path.insert(0, {str(PACKAGE_DIR)!r})\n"
-        f"os.environ['SM_LOG_PATH'] = {str(log_path)!r}\n"
+        f"os.environ['SM_TEST_LOG_PATH'] = {str(log_path)!r}\n"
         "import sm\n"
         "from pathlib import Path\n"
         f"sm.LOG_PATH = Path({str(log_path)!r})\n"
@@ -1654,7 +1654,7 @@ def test_cli_decompose_missing_key_exits_twelve(tmp_path):
     )
 
     env = os.environ.copy()
-    env["SM_LOG_PATH"] = str(log_path)
+    env["SM_TEST_LOG_PATH"] = str(log_path)
     env.pop("ANTHROPIC_API_KEY", None)
 
     cli = subprocess.run(
@@ -1675,7 +1675,7 @@ def test_cli_decompose_command_still_recognized_after_story_6(tmp_path):
     Story 6 — pin the CLI registration didn't drift."""
     log_path = tmp_path / "cli_log.jsonl"
     env = os.environ.copy()
-    env["SM_LOG_PATH"] = str(log_path)
+    env["SM_TEST_LOG_PATH"] = str(log_path)
     # Provide a key so we don't trip the no-key path; the call will
     # still fail (no iteration seeded), but it must NOT fail with
     # 'unknown command'.

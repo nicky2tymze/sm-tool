@@ -916,7 +916,7 @@ def test_cli_sprint_cut_command_known(tmp_path):
     the 'unknown command' status. Without an active iteration, the CLI
     must exit non-zero, but with a recognized-command failure path."""
     env = os.environ.copy()
-    env["SM_LOG_PATH"] = str(tmp_path / "cli_log.jsonl")
+    env["SM_TEST_LOG_PATH"] = str(tmp_path / "cli_log.jsonl")
 
     result = subprocess.run(
         [sys.executable, "-m", "sm", "sprint-cut", "1"],
@@ -936,7 +936,7 @@ def test_cli_sprint_cut_command_known(tmp_path):
 def test_cli_sprint_cut_no_active_iteration_exits_nonzero(tmp_path):
     """`python -m sm sprint-cut 1` with an empty log exits non-zero."""
     env = os.environ.copy()
-    env["SM_LOG_PATH"] = str(tmp_path / "cli_log.jsonl")
+    env["SM_TEST_LOG_PATH"] = str(tmp_path / "cli_log.jsonl")
 
     result = subprocess.run(
         [sys.executable, "-m", "sm", "sprint-cut", "1"],
@@ -978,7 +978,7 @@ def test_cli_sprint_cut_invalid_n_exits_nonzero(tmp_path):
         sm.LOG_PATH = orig_log
 
     env = os.environ.copy()
-    env["SM_LOG_PATH"] = str(log_path)
+    env["SM_TEST_LOG_PATH"] = str(log_path)
 
     result = subprocess.run(
         [sys.executable, "-m", "sm", "sprint-cut", "-1"],
@@ -1003,10 +1003,10 @@ def test_cli_sprint_cut_invalid_n_exits_nonzero(tmp_path):
 
 def test_cli_sprint_cut_valid_n_exits_zero(tmp_path):
     """`python -m sm sprint-cut <valid N>` exits 0 when an active iteration
-    + backlog exist on the log being pointed at via SM_LOG_PATH.
+    + backlog exist on the log being pointed at via SM_TEST_LOG_PATH.
 
     We seed the log directly via the same module the CLI uses, then point
-    the CLI at it via SM_LOG_PATH.
+    the CLI at it via SM_TEST_LOG_PATH.
     """
     import sm
 
@@ -1023,7 +1023,7 @@ def test_cli_sprint_cut_valid_n_exits_zero(tmp_path):
         sm.LOG_PATH = orig_log
 
     env = os.environ.copy()
-    env["SM_LOG_PATH"] = str(log_path)
+    env["SM_TEST_LOG_PATH"] = str(log_path)
 
     result = subprocess.run(
         [sys.executable, "-m", "sm", "sprint-cut", "3"],
@@ -1058,7 +1058,7 @@ def test_cli_sprint_cut_invalid_n_writes_nothing(tmp_path):
     bytes_before = log_path.read_bytes()
 
     env = os.environ.copy()
-    env["SM_LOG_PATH"] = str(log_path)
+    env["SM_TEST_LOG_PATH"] = str(log_path)
 
     result = subprocess.run(
         [sys.executable, "-m", "sm", "sprint-cut", "999"],

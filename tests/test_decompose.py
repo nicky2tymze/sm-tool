@@ -1627,7 +1627,7 @@ def test_cli_decompose_command_known(tmp_path):
     raises NotImplementedError, so the CLI must exit non-zero — that's fine.
     What we pin: the command is recognized, not 'unknown'."""
     env = os.environ.copy()
-    env["SM_LOG_PATH"] = str(tmp_path / "cli_log.jsonl")
+    env["SM_TEST_LOG_PATH"] = str(tmp_path / "cli_log.jsonl")
 
     result = subprocess.run(
         [sys.executable, "-m", "sm", "decompose"],
@@ -1651,7 +1651,7 @@ def test_cli_decompose_no_active_iteration_exits_nonzero(tmp_path):
     iteration). Pinned: exit code != 0 AND the failure is the expected
     'no active iteration' path (not the 'unknown command' path)."""
     env = os.environ.copy()
-    env["SM_LOG_PATH"] = str(tmp_path / "cli_log.jsonl")
+    env["SM_TEST_LOG_PATH"] = str(tmp_path / "cli_log.jsonl")
 
     result = subprocess.run(
         [sys.executable, "-m", "sm", "decompose"],

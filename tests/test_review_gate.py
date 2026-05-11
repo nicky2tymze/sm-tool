@@ -106,7 +106,7 @@ def cli_log(tmp_path):
     test_lifecycle_commands.py `cli_log`."""
     log_path = tmp_path / "cli_log.jsonl"
     env = os.environ.copy()
-    env["SM_LOG_PATH"] = str(log_path)
+    env["SM_TEST_LOG_PATH"] = str(log_path)
     return log_path, env
 
 

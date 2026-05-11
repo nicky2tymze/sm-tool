@@ -36,7 +36,7 @@ Tests must FAIL on first run — the four subcommands do not exist in
 these tests.
 
 The invocation contract is `python -m sm <command> <story_id>`, hermetically
-isolated via the SM_LOG_PATH env var (the same hook used by the Story 6
+isolated via the SM_TEST_LOG_PATH env var (the same hook used by the Story 6
 `ingest` CLI tests and the Story 11 `sprint-cut` CLI tests).
 """
 
@@ -68,11 +68,11 @@ def cli_log(tmp_path):
     """Return a (log_path, env) tuple for hermetic CLI invocation.
 
     The log_path is a fresh per-test tmp file; the env dict points the CLI
-    at it via SM_LOG_PATH. Mirrors the pattern from test_sprint_cut.py.
+    at it via SM_TEST_LOG_PATH. Mirrors the pattern from test_sprint_cut.py.
     """
     log_path = tmp_path / "cli_log.jsonl"
     env = os.environ.copy()
-    env["SM_LOG_PATH"] = str(log_path)
+    env["SM_TEST_LOG_PATH"] = str(log_path)
     return log_path, env
 
 

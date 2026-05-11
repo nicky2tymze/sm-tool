@@ -207,8 +207,16 @@ def test_new_env_var_redirects_log_path_for_ingest(tmp_path):
     spec_path.write_text(
         json.dumps({
             "iteration_id": "rename-smoke-iter",
-            "title": "Story 12 rename smoke",
-            "stories": [],
+            "iteration_goal": "Story 12 rename smoke",
+            "requirements": [
+                {
+                    "requirement_id": "req-1",
+                    "title": "Smoke req",
+                    "description": "Minimal valid requirement for ingest.",
+                    "priority": "MUST",
+                    "acceptance_criteria": "AC1",
+                },
+            ],
         }),
         encoding="utf-8",
     )
@@ -299,8 +307,16 @@ def test_new_env_var_smoke_ingest_then_status(tmp_path):
     spec_path.write_text(
         json.dumps({
             "iteration_id": "rename-smoke-two-step",
-            "title": "Two-step smoke",
-            "stories": [],
+            "iteration_goal": "Two-step smoke",
+            "requirements": [
+                {
+                    "requirement_id": "req-1",
+                    "title": "Smoke req",
+                    "description": "Minimal valid requirement for ingest.",
+                    "priority": "MUST",
+                    "acceptance_criteria": "AC1",
+                },
+            ],
         }),
         encoding="utf-8",
     )

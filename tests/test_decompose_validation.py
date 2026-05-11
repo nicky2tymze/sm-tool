@@ -897,7 +897,7 @@ def test_cli_decompose_subcommand_known(tmp_path):
     """`python -m sm decompose` is recognized as a known subcommand
     (does not print 'unknown command')."""
     env = os.environ.copy()
-    env["SM_LOG_PATH"] = str(tmp_path / "cli_log.jsonl")
+    env["SM_TEST_LOG_PATH"] = str(tmp_path / "cli_log.jsonl")
 
     result = subprocess.run(
         [sys.executable, "-m", "sm", "decompose"],
@@ -919,7 +919,7 @@ def test_cli_decompose_no_active_iteration_exits_nonzero(tmp_path):
     iteration). Pin: not the success code, not the 'unknown command'
     failure mode."""
     env = os.environ.copy()
-    env["SM_LOG_PATH"] = str(tmp_path / "cli_log.jsonl")
+    env["SM_TEST_LOG_PATH"] = str(tmp_path / "cli_log.jsonl")
 
     result = subprocess.run(
         [sys.executable, "-m", "sm", "decompose"],

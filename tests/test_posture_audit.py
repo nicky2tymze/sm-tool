@@ -2,7 +2,7 @@
 
 Static verification of sm.py source: no network sockets, no auth libraries,
 no third-party imports, and no environment variable reads beyond the
-established suite-session convention (`SM_LOG_PATH`, Assumption 7).
+established suite-session convention (`SM_TEST_LOG_PATH`, Assumption 7).
 
 These tests are read-only: they ingest `sm.py` as text and apply regex /
 substring checks. They run in milliseconds and require no fixtures.
@@ -230,9 +230,9 @@ def _env_keys_read(src: str) -> set[str]:
 
 _ALLOWED_ENV_VAR_READS = {
     # Story 9 — hermetic subprocess test log path. Established Iter 1.
-    "SM_LOG_PATH",
+    "SM_TEST_LOG_PATH",
     # Iter 2 Story 2 — single-source-of-truth resolver for the Anthropic
-    # API key. Posture evolved from "no env reads beyond SM_LOG_PATH" to
+    # API key. Posture evolved from "no env reads beyond SM_TEST_LOG_PATH" to
     # "the API key joins via the explicit `resolve_api_key()` helper".
     # Same cascade pattern Story 1 used to update the runtime-deps audit.
     "ANTHROPIC_API_KEY",
@@ -256,7 +256,7 @@ def test_only_sm_log_path_env_var_read():
     """Every os.environ.get / os.environ[...] / os.getenv must target one
     of the explicitly allowed env vars.
 
-    Iter 1 pinned `{SM_LOG_PATH}` only; Iter 2 Story 2 expands the
+    Iter 1 pinned `{SM_TEST_LOG_PATH}` only; Iter 2 Story 2 expands the
     allowlist to include `ANTHROPIC_API_KEY` (read once, inside
     `resolve_api_key`). Any further additions require a deliberate
     posture review — keep the allowlist tight.
@@ -269,10 +269,10 @@ def test_only_sm_log_path_env_var_read():
 
 
 def test_sm_log_path_is_actually_read():
-    """Positive control — Story 9 established SM_LOG_PATH for hermetic
+    """Positive control — Story 9 established SM_TEST_LOG_PATH for hermetic
     subprocess testing. Confirm it's still wired up.
     """
-    assert "SM_LOG_PATH" in _env_keys_read(_source())
+    assert "SM_TEST_LOG_PATH" in _env_keys_read(_source())
 
 
 def test_no_user_or_home_env_reads():

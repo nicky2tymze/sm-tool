@@ -1265,7 +1265,7 @@ def test_append_entry_not_called_on_validation_failure(
 # The CLI surface is part of Story 5's "terminal command" requirement.
 
 def _project_env(tmp_path: pathlib.Path) -> dict:
-    """Build an env where sm.LOG_PATH is redirected via SM_LOG_PATH (if
+    """Build an env where sm.LOG_PATH is redirected via SM_TEST_LOG_PATH (if
     supported) — but for now we rely on the cwd to keep tests hermetic.
 
     The simplest hermetic path is: chdir to tmp_path and accept that the
@@ -1283,7 +1283,7 @@ def test_cli_module_runs_without_error_for_valid_handoff(tmp_path):
 
     NOTE: This test creates a separate subprocess which writes to the
     package's real log.jsonl. To keep the test hermetic, we re-point
-    LOG_PATH via an env var IF sm supports SM_LOG_PATH; otherwise we
+    LOG_PATH via an env var IF sm supports SM_TEST_LOG_PATH; otherwise we
     skip cleanup of the real log (acceptable for Iter 1).
     """
     import os
@@ -1296,7 +1296,7 @@ def test_cli_module_runs_without_error_for_valid_handoff(tmp_path):
     # pointing at the package log — still exits 0 if the package log is
     # empty / has no active iteration.
     env = os.environ.copy()
-    env["SM_LOG_PATH"] = str(tmp_path / "cli_log.jsonl")
+    env["SM_TEST_LOG_PATH"] = str(tmp_path / "cli_log.jsonl")
 
     result = subprocess.run(
         [sys.executable, "-m", "sm", "ingest", str(p)],
@@ -1327,7 +1327,7 @@ def test_cli_module_nonzero_for_missing_path(tmp_path):
 
     missing = tmp_path / "definitely_missing.json"
     env = os.environ.copy()
-    env["SM_LOG_PATH"] = str(tmp_path / "cli_log.jsonl")
+    env["SM_TEST_LOG_PATH"] = str(tmp_path / "cli_log.jsonl")
 
     result = subprocess.run(
         [sys.executable, "-m", "sm", "ingest", str(missing)],
@@ -1355,7 +1355,7 @@ def test_cli_module_prints_iteration_id_on_success(tmp_path):
     p.write_text(json.dumps(handoff), encoding="utf-8")
 
     env = os.environ.copy()
-    env["SM_LOG_PATH"] = str(tmp_path / "cli_log.jsonl")
+    env["SM_TEST_LOG_PATH"] = str(tmp_path / "cli_log.jsonl")
 
     result = subprocess.run(
         [sys.executable, "-m", "sm", "ingest", str(p)],

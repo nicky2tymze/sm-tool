@@ -140,7 +140,7 @@ def cli_log(tmp_path):
     """Return a (log_path, env) tuple for hermetic CLI invocation.
 
     No roles staging here — the CLI inherits the package's real roles/
-    directory because LOG_PATH redirects via SM_LOG_PATH, and the subprocess
+    directory because LOG_PATH redirects via SM_TEST_LOG_PATH, and the subprocess
     runs with cwd=PACKAGE_DIR so LOG_PATH.parent has the roles/ dir on disk.
     For tmp_path-anchored LOG_PATH the subprocess test needs roles/ too —
     mirror them in.
@@ -152,7 +152,7 @@ def cli_log(tmp_path):
     if not dest.exists() and SOURCE_ROLES_DIR.is_dir():
         shutil.copytree(SOURCE_ROLES_DIR, dest)
     env = os.environ.copy()
-    env["SM_LOG_PATH"] = str(log_path)
+    env["SM_TEST_LOG_PATH"] = str(log_path)
     return log_path, env
 
 

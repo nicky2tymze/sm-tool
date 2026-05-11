@@ -148,10 +148,10 @@ def _close_active_iteration(reason=None) -> None:
 
 def _run_cli(handoff_path, tmp_path, log_name="cli_log.jsonl"):
     """Invoke `python -m sm ingest <path>` in a hermetic env with
-    SM_LOG_PATH redirected. Returns the CompletedProcess.
+    SM_TEST_LOG_PATH redirected. Returns the CompletedProcess.
     """
     env = os.environ.copy()
-    env["SM_LOG_PATH"] = str(tmp_path / log_name)
+    env["SM_TEST_LOG_PATH"] = str(tmp_path / log_name)
     return subprocess.run(
         [sys.executable, "-m", "sm", "ingest", str(handoff_path)],
         cwd=str(PACKAGE_DIR),
@@ -164,13 +164,13 @@ def _run_cli(handoff_path, tmp_path, log_name="cli_log.jsonl"):
 
 def _seed_cli_with_open_iteration(tmp_path, iter_id: str,
                                   log_name="cli_log.jsonl"):
-    """Run a successful CLI ingest first so that the SM_LOG_PATH log
+    """Run a successful CLI ingest first so that the SM_TEST_LOG_PATH log
     contains an `iteration_open` entry. Returns the env dict that
     points at the same log file (so a second CLI call sees the
     seeded state).
     """
     env = os.environ.copy()
-    env["SM_LOG_PATH"] = str(tmp_path / log_name)
+    env["SM_TEST_LOG_PATH"] = str(tmp_path / log_name)
     h = _canonical_handoff(iteration_id=iter_id)
     p = tmp_path / f"seed_{iter_id}.json"
     p.write_text(json.dumps(h), encoding="utf-8")
@@ -533,11 +533,11 @@ def test_cli_duplicate_iteration_id_exits_dup_id_code(tmp_path):
     env = _seed_cli_with_open_iteration(tmp_path, "iter-X", log_name=log_name)
 
     # Manually close iter-X by appending an iteration_close entry directly
-    # to the SM_LOG_PATH file the CLI is using. We do this by importing sm
+    # to the SM_TEST_LOG_PATH file the CLI is using. We do this by importing sm
     # and pointing it at the same file.
     import sm
     from pathlib import Path as _P
-    target_log = _P(env["SM_LOG_PATH"])
+    target_log = _P(env["SM_TEST_LOG_PATH"])
     # Build close entry via the canonical builder, then append manually
     # so the on-disk log gains an iteration_close record.
     close = sm.build_entry("iteration_close", {

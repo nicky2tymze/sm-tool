@@ -65,7 +65,7 @@ do not exist yet. The Coder downstream implements them to satisfy these
 tests.
 
 The CLI invocation contract is `python -m sm status`, hermetically
-isolated via the SM_LOG_PATH env var (the same hook used by every other
+isolated via the SM_TEST_LOG_PATH env var (the same hook used by every other
 Sprint 2 subcommand-level test).
 """
 
@@ -105,10 +105,10 @@ def isolated_log(tmp_path, monkeypatch):
 
 @pytest.fixture
 def cli_log(tmp_path):
-    """Return (log_path, env) for hermetic CLI invocation via SM_LOG_PATH."""
+    """Return (log_path, env) for hermetic CLI invocation via SM_TEST_LOG_PATH."""
     log_path = tmp_path / "cli_log.jsonl"
     env = os.environ.copy()
-    env["SM_LOG_PATH"] = str(log_path)
+    env["SM_TEST_LOG_PATH"] = str(log_path)
     return log_path, env
 
 

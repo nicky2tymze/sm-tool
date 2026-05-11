@@ -438,14 +438,14 @@ def test_resolve_api_key_failure_does_not_import_anthropic_empty_string(
 
 def _run_cli_decompose_no_key(tmp_path) -> subprocess.CompletedProcess:
     """Run `python -m sm decompose` with NO ANTHROPIC_API_KEY in the
-    env and an isolated SM_LOG_PATH. Returns the CompletedProcess.
+    env and an isolated SM_TEST_LOG_PATH. Returns the CompletedProcess.
     Used by the CLI mapping tests below."""
     env = os.environ.copy()
     env.pop("ANTHROPIC_API_KEY", None)
     # Honor the existing test-isolation env var name. Story 12 renames
     # this to SM_TEST_LOG_PATH; we use the current name to avoid
     # ordering-dependence with that retro story.
-    env["SM_LOG_PATH"] = str(tmp_path / "cli_log.jsonl")
+    env["SM_TEST_LOG_PATH"] = str(tmp_path / "cli_log.jsonl")
     return subprocess.run(
         [sys.executable, "-m", "sm", "decompose"],
         cwd=str(PACKAGE_DIR),

@@ -725,7 +725,7 @@ def resolve_role_spec(role: str) -> Path:
         return spec_path
 
     # Iter 2 Story 6 — when the LOG_PATH-anchored roles/ dir does NOT
-    # exist (CLI subprocess with SM_LOG_PATH override pointing at a
+    # exist (CLI subprocess with SM_TEST_LOG_PATH override pointing at a
     # temp dir that has no roles/ staged), fall back to the directory
     # holding sm.py itself. Tests that anchor on LOG_PATH and expect
     # RoleSpecNotFoundError stage an empty roles/ subdir (see
@@ -2972,8 +2972,8 @@ def _cli_main(argv: list) -> int:
         return EXIT_OK
 
     if cmd == "decompose":
-        # Honor SM_LOG_PATH for hermetic subprocess testing.
-        env_log = os.environ.get("SM_LOG_PATH")
+        # Honor SM_TEST_LOG_PATH for hermetic subprocess testing.
+        env_log = os.environ.get("SM_TEST_LOG_PATH")
         if env_log:
             LOG_PATH = Path(env_log)
 
@@ -3024,8 +3024,8 @@ def _cli_main(argv: list) -> int:
             print(_HELP_TEXT, file=_sys.stderr)
             return EXIT_OTHER
 
-        # Honor SM_LOG_PATH for hermetic subprocess testing.
-        env_log = os.environ.get("SM_LOG_PATH")
+        # Honor SM_TEST_LOG_PATH for hermetic subprocess testing.
+        env_log = os.environ.get("SM_TEST_LOG_PATH")
         if env_log:
             LOG_PATH = Path(env_log)
 
@@ -3061,9 +3061,9 @@ def _cli_main(argv: list) -> int:
             print(_HELP_TEXT, file=_sys.stderr)
             return EXIT_OTHER
 
-        # Honor SM_LOG_PATH env var if set, so subprocess CLI tests stay
+        # Honor SM_TEST_LOG_PATH env var if set, so subprocess CLI tests stay
         # hermetic and the package's real log isn't touched.
-        env_log = os.environ.get("SM_LOG_PATH")
+        env_log = os.environ.get("SM_TEST_LOG_PATH")
         if env_log:
             LOG_PATH = Path(env_log)
 
@@ -3110,8 +3110,8 @@ def _cli_main(argv: list) -> int:
 
         story_id = argv[1]
 
-        # Honor SM_LOG_PATH for hermetic subprocess testing.
-        env_log = os.environ.get("SM_LOG_PATH")
+        # Honor SM_TEST_LOG_PATH for hermetic subprocess testing.
+        env_log = os.environ.get("SM_TEST_LOG_PATH")
         if env_log:
             LOG_PATH = Path(env_log)
 
@@ -3141,8 +3141,8 @@ def _cli_main(argv: list) -> int:
             print(_HELP_TEXT)
             return EXIT_OK
 
-        # Honor SM_LOG_PATH for hermetic subprocess testing.
-        env_log = os.environ.get("SM_LOG_PATH")
+        # Honor SM_TEST_LOG_PATH for hermetic subprocess testing.
+        env_log = os.environ.get("SM_TEST_LOG_PATH")
         if env_log:
             LOG_PATH = Path(env_log)
 
@@ -3236,8 +3236,8 @@ def _cli_main(argv: list) -> int:
             print(_HELP_TEXT)
             return EXIT_OK
 
-        # Honor SM_LOG_PATH for hermetic subprocess testing.
-        env_log = os.environ.get("SM_LOG_PATH")
+        # Honor SM_TEST_LOG_PATH for hermetic subprocess testing.
+        env_log = os.environ.get("SM_TEST_LOG_PATH")
         if env_log:
             LOG_PATH = Path(env_log)
 
@@ -3264,8 +3264,8 @@ def _cli_main(argv: list) -> int:
             )
             return EXIT_OTHER
 
-        # Honor SM_LOG_PATH for hermetic subprocess testing.
-        env_log = os.environ.get("SM_LOG_PATH")
+        # Honor SM_TEST_LOG_PATH for hermetic subprocess testing.
+        env_log = os.environ.get("SM_TEST_LOG_PATH")
         if env_log:
             LOG_PATH = Path(env_log)
 
@@ -3294,8 +3294,8 @@ def _cli_main(argv: list) -> int:
             print(_HELP_TEXT)
             return EXIT_OK
 
-        # Honor SM_LOG_PATH for hermetic subprocess testing.
-        env_log = os.environ.get("SM_LOG_PATH")
+        # Honor SM_TEST_LOG_PATH for hermetic subprocess testing.
+        env_log = os.environ.get("SM_TEST_LOG_PATH")
         if env_log:
             LOG_PATH = Path(env_log)
 
@@ -3365,8 +3365,8 @@ def _cli_main(argv: list) -> int:
 
         story_id = argv[1]
 
-        # Honor SM_LOG_PATH for hermetic subprocess testing.
-        env_log = os.environ.get("SM_LOG_PATH")
+        # Honor SM_TEST_LOG_PATH for hermetic subprocess testing.
+        env_log = os.environ.get("SM_TEST_LOG_PATH")
         if env_log:
             LOG_PATH = Path(env_log)
 
