@@ -1607,7 +1607,8 @@ def _derive_state_full() -> tuple:
 
     Walks the event log ONCE and returns a tuple:
 
-        (state, seen_iteration_ids, latest_in_sprint_story_ids)
+        (state, seen_iteration_ids, latest_in_sprint_story_ids,
+         active_iteration_sprint_cohorts)
 
     where:
       - ``state`` is the same six-key dict that public ``derive_state()``
@@ -1620,11 +1621,21 @@ def _derive_state_full() -> tuple:
         from the LATEST ``sprint_cut`` entry encountered (or ``[]`` if no
         sprint_cut has been written). ``close_iteration()`` consumes this
         list so it doesn't need a second walk just to recover it.
+      - ``active_iteration_sprint_cohorts`` is iter4-multisprint-v2 Story
+        4's slot: a list of ``in_sprint_story_ids`` lists, one per
+        ``sprint_cut`` entry belonging to the currently-active iteration,
+        in on-log append order (1-indexed sprint position = index + 1).
+        Reset whenever an ``iteration_open`` or ``iteration_close`` is
+        seen (so prior iterations' cuts don't bleed in). When no
+        iteration is currently active this list is empty.
+        ``close_iteration`` consumes this to validate that every story
+        across EVERY sprint cut is terminal (defense-in-depth against
+        bypass scenarios where the sprint_cut lock didn't fire).
 
     This is the canonical primitive after Story 11 — callers that need
     only the state dict go through the public ``derive_state()`` wrapper,
-    which drops the other two values on the floor. Callers that ALSO
-    need ``seen_iteration_ids`` (ingest) or ``latest_in_sprint_story_ids``
+    which drops the other tuple values on the floor. Callers that ALSO
+    need ``seen_iteration_ids`` (ingest) or the sprint-cut slots
     (close_iteration) call this helper directly so a single walk feeds
     everything. PRIVATE; not in __all__.
     """
@@ -1646,6 +1657,13 @@ def _derive_state_full() -> tuple:
     # so close_iteration can read it from the same walk instead of doing
     # a second one. Initialized to [] (no sprint_cut written yet).
     latest_in_sprint_story_ids: list = []
+
+    # iter4-multisprint-v2 Story 4: per-cut in_sprint_story_ids for every
+    # sprint_cut entry belonging to the currently-active iteration, in
+    # on-log append order. Reset on iteration_open / iteration_close so
+    # prior iterations' cuts don't leak into the active iteration's
+    # validation. close_iteration consumes this list.
+    active_iteration_sprint_cohorts: list = []
 
     # Iter 2 Story 6: track whether a story_backlog has been written
     # for the currently-active iteration. A subsequent `iteration_open`
@@ -1682,6 +1700,11 @@ def _derive_state_full() -> tuple:
             state["iteration_goal"] = entry.get("iteration_goal")
             state["close_status"] = None  # clear on new open
             _decomposed_since_open = False
+            # iter4-multisprint-v2 Story 4: opening a new iteration
+            # resets the active-iteration sprint cohort list. Any cuts
+            # from a prior iteration belong to that prior iteration, not
+            # the one we're tracking now.
+            active_iteration_sprint_cohorts = []
 
             # Track for ingest's dup-id check.
             iid = entry.get("iteration_id")
@@ -1699,6 +1722,10 @@ def _derive_state_full() -> tuple:
                 "force_closed_count": entry.get("force_closed_count", 0),
             }
             _decomposed_since_open = False
+            # iter4-multisprint-v2 Story 4: closing an iteration empties
+            # the active-iteration sprint cohort list. If a new iteration
+            # later opens, we start its cohort list fresh.
+            active_iteration_sprint_cohorts = []
 
         elif etype == "story_decomposed" or etype == "story_backlog":
             stories = entry.get("stories", [])
@@ -1721,9 +1748,16 @@ def _derive_state_full() -> tuple:
             # close_iteration can read it without a second walk. We
             # intentionally do NOT promote this onto the public state
             # dict — close_iteration consumes it via _derive_state_full.
-            latest_in_sprint_story_ids = list(
-                entry.get("in_sprint_story_ids", []) or []
-            )
+            cohort = list(entry.get("in_sprint_story_ids", []) or [])
+            latest_in_sprint_story_ids = cohort
+            # iter4-multisprint-v2 Story 4: also append this cohort to
+            # the per-cut list for the active iteration. Only append
+            # while an iteration is actually open — a sprint_cut entry
+            # appearing outside an active iteration shouldn't count.
+            # (Under normal lifecycle sprint_cut requires an active
+            # iteration; this `if` is defense-in-depth for log surgery.)
+            if state["active_iteration"] is not None:
+                active_iteration_sprint_cohorts.append(cohort)
 
         elif etype == "story_state_change":
             sid = entry.get("story_id")
@@ -1744,7 +1778,12 @@ def _derive_state_full() -> tuple:
 
         # Unknown entry types: no-op (forward-compat).
 
-    return state, seen_iteration_ids, latest_in_sprint_story_ids
+    return (
+        state,
+        seen_iteration_ids,
+        latest_in_sprint_story_ids,
+        active_iteration_sprint_cohorts,
+    )
 
 
 def derive_state() -> dict:
@@ -1779,9 +1818,10 @@ def derive_state() -> dict:
     Unknown entry types are no-ops (forward-compatibility).
     """
     # Thin wrapper around the single-pass primitive. Drops the
-    # seen_iteration_ids and latest_in_sprint_story_ids tuple slots —
-    # those are internal-only and not part of the public state shape.
-    state, _seen, _in_sprint = _derive_state_full()
+    # seen_iteration_ids, latest_in_sprint_story_ids, and
+    # active_iteration_sprint_cohorts tuple slots — those are internal-
+    # only and not part of the public state shape.
+    state, _seen, _in_sprint, _cohorts = _derive_state_full()
     return state
 
 
@@ -1882,7 +1922,7 @@ def ingest(path) -> dict:
     # the set of every prior iteration_open id (for the dup-id check).
     # Pre-Story-11 this was two walks: derive_state() + a second
     # read_entries loop. Now it is one. Pure read; no log write.
-    state, seen_iteration_ids, _in_sprint = _derive_state_full()
+    state, seen_iteration_ids, _in_sprint, _cohorts = _derive_state_full()
 
     # --- Single-active-iteration enforcement.
     # Story 7 precedence: this check fires BEFORE the dup-id check. When
@@ -3225,13 +3265,16 @@ def close_iteration(
         `close_iteration(closed_by="force-close", reason="<text>")` without
         breaking change.
     """
-    # --- Single-pass replay (Iter 2 Story 11).
+    # --- Single-pass replay (Iter 2 Story 11 + iter4-multisprint-v2
+    # Story 4).
     # `_derive_state_full` walks the log exactly once and returns the
-    # state dict (now carrying `iteration_goal`, retro item 10) plus the
-    # latest sprint_cut's in_sprint_story_ids. close_iteration no longer
-    # makes a second log-read pass — both values come from the one walk
-    # that derive_state already needed.
-    state, _seen, in_sprint_ids = _derive_state_full()
+    # state dict (carrying `iteration_goal`, retro item 10), the latest
+    # sprint_cut's in_sprint_story_ids, AND (Story 4) the per-cut
+    # in_sprint cohorts for every sprint_cut entry in the active
+    # iteration. close_iteration does NOT invoke the log-reader
+    # directly — both the latest cut's roster and the all-cuts roster
+    # come from the single walk that derive_state already needed.
+    state, _seen, in_sprint_ids, active_cohorts = _derive_state_full()
 
     # --- Validation cascade ---
     if state["active_iteration"] is None:
@@ -3257,24 +3300,52 @@ def close_iteration(
     iteration_id = state["active_iteration"].get("iteration_id")
     iteration_goal: Optional[str] = state["iteration_goal"]
 
-    # --- Gate: every in-sprint story must be in a terminal state. ---
+    # --- iter4-multisprint-v2 Story 4: validate every in-sprint story
+    # across EVERY sprint_cut entry belonging to the active iteration
+    # (not just the latest cut). `active_cohorts` comes from the same
+    # single _derive_state_full walk and is a list of per-cut
+    # in_sprint_story_ids lists in on-log append order — sprint
+    # position (1-indexed) = index + 1.
+    #
+    # Defense-in-depth: under normal lifecycle the sprint_cut lock
+    # guarantees prior cuts' stories are terminal before a re-cut
+    # runs, so `active_cohorts` reduces to the latest cohort in
+    # practice. But if a sprint_cut entry is written via any path
+    # that bypasses the lock (a future API, manual log surgery, force
+    # close edge cases), close_iteration must still detect prior-cut
+    # offenders and refuse.
+    #
+    # When the active iteration has only ONE sprint_cut entry, the
+    # all-cuts list collapses to that single cut and behavior reduces
+    # to the Iter 1 contract (single-cut validation, single-cut counts).
+    #
+    # Sprint position attribution: each story is attributed to the
+    # FIRST cohort containing it. Story 3's semantics guarantee each
+    # story_id appears in at most one cut, so attribution is
+    # unambiguous; the `seen_sids` guard is defense-in-depth.
     story_states = state["story_states"]
-    non_terminal = []
-    for sid in in_sprint_ids:
-        cur = story_states.get(sid, "planned")
-        if cur not in {"accepted", "rejected", "force_closed"}:
-            non_terminal.append((sid, cur))
+    terminal_states = {"accepted", "rejected", "force_closed"}
+    non_terminal: list = []  # list of (story_id, sprint_position, state)
+    seen_sids: set = set()
+    for cut_idx, cohort in enumerate(active_cohorts):
+        sprint_position = cut_idx + 1
+        for sid in cohort:
+            if sid in seen_sids:
+                continue
+            seen_sids.add(sid)
+            cur = story_states.get(sid, "planned")
+            if cur not in terminal_states:
+                non_terminal.append((sid, sprint_position, cur))
 
     if non_terminal:
         details = ", ".join(
-            f"{sid!r} (state={state_name!r})"
-            for sid, state_name in non_terminal
+            f"{sid!r} (sprint {sprint_pos}, state={state_name!r})"
+            for sid, sprint_pos, state_name in non_terminal
         )
         raise IterationCloseError(
-            f"cannot close iteration {iteration_id!r}: the following "
-            f"in-sprint stories are still non-terminal: {details}; every "
-            f"in-sprint story must be accepted, rejected, or force-closed "
-            f"before close"
+            f"cannot close iteration {iteration_id!r}: non-terminal "
+            f"stories: {details}; resolve to "
+            f"{{accepted, rejected, force_closed}} before closing"
         )
 
     # --- Aggregate per-requirement status (Story 17). Pure function over

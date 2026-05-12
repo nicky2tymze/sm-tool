@@ -409,7 +409,7 @@ def test_latest_in_sprint_story_ids_from_latest_cut(isolated_log):
     _resolve_terminal("s1", "accepted")
     _cut(3, in_sprint_ids=["s1", "s2", "s3"])
 
-    _state, _seen, latest_in_sprint = sm._derive_state_full()
+    _state, _seen, latest_in_sprint, _cohorts = sm._derive_state_full()
     assert latest_in_sprint == ["s1", "s2", "s3"]
 
 
@@ -426,7 +426,7 @@ def test_latest_in_sprint_story_ids_smaller_cut_still_wins(isolated_log):
     _resolve_terminal("s3", "accepted")
     _cut(1, in_sprint_ids=["s1"])
 
-    _state, _seen, latest_in_sprint = sm._derive_state_full()
+    _state, _seen, latest_in_sprint, _cohorts = sm._derive_state_full()
     assert latest_in_sprint == ["s1"]
 
 
@@ -436,7 +436,7 @@ def test_latest_in_sprint_story_ids_empty_when_no_cuts(isolated_log):
     _open_iteration("iter-1", ["1"])
     _decompose([_story("s1", 1)])
 
-    _state, _seen, latest_in_sprint = sm._derive_state_full()
+    _state, _seen, latest_in_sprint, _cohorts = sm._derive_state_full()
     assert latest_in_sprint == []
 
 

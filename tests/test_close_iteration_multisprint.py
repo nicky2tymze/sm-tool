@@ -490,7 +490,7 @@ def test_close_detects_offenders_across_multiple_prior_cuts(isolated_log):
     _craft_state_change(sids[0], "planned", "in_progress")  # sprint 1 offender
     _craft_sprint_cut(2, sids[2:4],
                       [sids[0], sids[1], sids[4], sids[5], sids[6], sids[7]])
-    _craft_state_change(sids[2], "planned", "in_review")  # sprint 2 offender
+    _craft_state_change(sids[2], "planned", "in_progress")  # sprint 2 offender
     _craft_sprint_cut(2, sids[4:6],
                       [sids[0], sids[1], sids[2], sids[3],
                        sids[6], sids[7]])
