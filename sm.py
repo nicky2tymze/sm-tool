@@ -3979,7 +3979,7 @@ Read-only commands:
 Mutating commands:
   ingest <path>                           Ingest a PO Tool iteration_open JSON.
   decompose                               Decompose requirements into stories.
-  sprint-cut <N>                          Cut backlog at index N (sprint commit).
+  sprint-cut <N>                          Cut the next N currently-planned stories into a new sprint (multi-sprint).
   start <story_id>                        Move story -> in_progress.
   submit <story_id>                       Move story -> in_review.
   record-review <id> --approved <bool> --test-result <text>
@@ -3988,8 +3988,15 @@ Mutating commands:
   reject <story_id>                       Move story -> rejected.
   execute <story_id>                      Run TestWriter->Coder->Reviewer pipeline.
 
+Notes on sprint-cut (multi-sprint semantics):
+  Multiple cuts are allowed per iteration. N applies to the
+  currently-planned stories (those not yet in a sprint), not to
+  the cumulative original-backlog position. A subsequent sprint-cut
+  is only permitted once every story in the prior cut has reached
+  terminal state (accepted, rejected, or force_closed).
+
 Terminal commands:
-  close                                   Close iteration (validation gate).
+  close                                   Close iteration; validates every in-sprint story across all sprints is in a terminal state.
   force-close --reason <text>             Force-close iteration (escape valve).
 
 Exit codes:
