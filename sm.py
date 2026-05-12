@@ -2670,28 +2670,46 @@ def sprint_cut(n: int) -> dict:
             f"position {n} exceeds backlog length {L}"
         )
 
-    # Story 12 — re-cut lock check. After all type/state/range validation
-    # passes, scan the log for the LATEST prior sprint_cut entry. If one
-    # exists, this is a re-cut: any in-sprint story (per that entry's
-    # in_sprint_story_ids) whose state has left "planned" locks the cut.
-    # Lock is replay-derived from `state` already in hand — no separate
-    # flag is persisted, and no log write happens on failure.
+    # iter4-multisprint-v2 Story 1 — re-cut lock relaxed to terminal-only.
+    # After all type/state/range validation passes, scan the log for the
+    # LATEST prior sprint_cut entry IN THE CURRENT ACTIVE ITERATION. If
+    # one exists, this is a re-cut: any in-sprint story (per that entry's
+    # in_sprint_story_ids) whose state is NOT terminal locks the cut.
+    # Terminal = {accepted, rejected, force_closed}; non-terminal =
+    # {planned, in_progress, in_review}. The relaxation enables multiple
+    # sprint_cut entries within one iteration so long as each prior cohort
+    # is fully resolved before the next cut. Lock is replay-derived from
+    # `state` already in hand — no separate flag is persisted, and no log
+    # write happens on failure.
+    #
+    # Cross-iteration scope: sprint_cut entries from PRIOR (closed)
+    # iterations are NOT considered — iteration_open and iteration_close
+    # both reset the lock candidate so the lock check is scoped to the
+    # active iteration only.
     latest_prior_in_sprint = None
     for entry in read_entries():
-        if entry.get("type") == "sprint_cut":
+        etype = entry.get("type")
+        if etype == "sprint_cut":
             latest_prior_in_sprint = entry.get("in_sprint_story_ids", [])
+        elif etype in ("iteration_open", "iteration_close"):
+            latest_prior_in_sprint = None
 
     if latest_prior_in_sprint is not None:
         story_states = state["story_states"]
+        _TERMINAL = {"accepted", "rejected", "force_closed"}
         offenders = [
-            sid for sid in latest_prior_in_sprint
-            if story_states.get(sid, "planned") != "planned"
+            (sid, story_states.get(sid, "planned"))
+            for sid in latest_prior_in_sprint
+            if story_states.get(sid, "planned") not in _TERMINAL
         ]
         if offenders:
+            rendered = ", ".join(
+                f"{sid} ({state_})" for sid, state_ in offenders
+            )
             raise SprintCutLockedError(
-                f"sprint cut locked — these in-sprint stories have left "
-                f"planned state: {offenders!r}; close or force-close the "
-                f"iteration before re-cutting"
+                f"sprint-cut locked — these in-sprint stories are "
+                f"non-terminal: {rendered}; resolve each to "
+                f"{{accepted, rejected, force_closed}} before re-cutting"
             )
 
     # Build the cut: stories 1..N in sprint, N+1..L deferred. derive_state

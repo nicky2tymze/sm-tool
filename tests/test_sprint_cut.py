@@ -137,6 +137,32 @@ def _seed_full(n_stories: int = 5,
     return _seed_backlog(n=n_stories)
 
 
+def _craft_state_change(story_id: str, from_state: str, to_state: str):
+    """iter4-multisprint-v2 cascade helper — bypass per-story command
+    and write a `story_state_change` entry directly. Mirrors the helper
+    in test_sprint_cut_lock.py. Used by re-cut tests to resolve the
+    in-sprint cohort to a terminal state so the relaxed lock permits
+    the re-cut."""
+    import sm
+    entry = sm.build_entry("story_state_change", {
+        "story_id": story_id,
+        "from_state": from_state,
+        "to_state": to_state,
+        "notes": "test fixture",
+    })
+    sm._append_entry(entry)
+    return entry
+
+
+def _resolve_to_force_closed(story_ids):
+    """Force-close every story in the iterable straight from planned
+    (legal per _VALID_TRANSITIONS). Cheap way to put an in-sprint cohort
+    into the terminal accepting set before a re-cut under the
+    iter4-multisprint-v2 Story 1 relaxed lock."""
+    for sid in story_ids:
+        _craft_state_change(sid, "planned", "force_closed")
+
+
 # ===========================================================================
 # Smoke (5+) — function exists, callable, public, in __all__, accepts int
 # ===========================================================================
@@ -588,10 +614,15 @@ def test_no_backlog_yet_derive_state_unchanged(isolated_log):
 
 
 def test_recut_3_then_5_replay_shows_5(isolated_log):
-    """Cut at 3, then cut at 5 → derive_state shows 5 (latest wins)."""
+    """Cut at 3, then cut at 5 → derive_state shows 5 (latest wins).
+
+    iter4-multisprint-v2 Story 1 cascade: re-cut now requires the prior
+    in-sprint cohort to be terminal. Resolve sids[0..2] to force_closed
+    before the second cut so the relaxed lock permits it."""
     import sm
-    _seed_full(n_stories=6)
+    sids = _seed_full(n_stories=6)
     sm.sprint_cut(3)
+    _resolve_to_force_closed(sids[:3])
     sm.sprint_cut(5)
     state = sm.derive_state()
     assert state["sprint_cut"] == 5
@@ -599,46 +630,71 @@ def test_recut_3_then_5_replay_shows_5(isolated_log):
 
 def test_recut_5_then_2_replay_shows_2(isolated_log):
     """Cut at 5, then cut at 2 → derive_state shows 2 (latest wins,
-    even when the new cut is smaller)."""
+    even when the new cut is smaller).
+
+    iter4-multisprint-v2 Story 1 cascade: resolve the prior in-sprint
+    cohort (sids[0..4]) to terminal before the smaller re-cut."""
     import sm
-    _seed_full(n_stories=6)
+    sids = _seed_full(n_stories=6)
     sm.sprint_cut(5)
+    _resolve_to_force_closed(sids[:5])
     sm.sprint_cut(2)
     state = sm.derive_state()
     assert state["sprint_cut"] == 2
 
 
 def test_recut_writes_two_entries(isolated_log):
-    """Each successful cut writes a new entry — re-cut does not erase."""
+    """Each successful cut writes a new entry — re-cut does not erase.
+
+    iter4-multisprint-v2 Story 1 cascade: terminal-resolve the in-sprint
+    cohort between cuts."""
     import sm
-    _seed_full(n_stories=6)
+    sids = _seed_full(n_stories=6)
     before = list(sm.read_entries())
     sm.sprint_cut(3)
+    _resolve_to_force_closed(sids[:3])
     sm.sprint_cut(5)
     after = list(sm.read_entries())
-    assert len(after) == len(before) + 2
+    # +2 sprint_cut entries plus 3 story_state_change entries from the
+    # terminal resolution between cuts.
+    assert len(after) == len(before) + 2 + 3
 
 
 def test_recut_many_times_latest_wins(isolated_log):
-    """Many recuts in a row — derive_state shows the very last."""
+    """Many recuts in a row — derive_state shows the very last.
+
+    iter4-multisprint-v2 Story 1 cascade: between each pair of cuts,
+    terminal-resolve the in-sprint cohort so the relaxed lock permits
+    the next cut."""
     import sm
-    _seed_full(n_stories=8)
+    sids = _seed_full(n_stories=8)
     sm.sprint_cut(1)
+    _resolve_to_force_closed(sids[:1])
     sm.sprint_cut(2)
+    # sids[0] already terminal; resolve sids[1] (the newly-added one).
+    _resolve_to_force_closed(sids[1:2])
     sm.sprint_cut(3)
+    _resolve_to_force_closed(sids[2:3])
     sm.sprint_cut(4)
+    _resolve_to_force_closed(sids[3:4])
     sm.sprint_cut(7)
     state = sm.derive_state()
     assert state["sprint_cut"] == 7
 
 
 def test_recut_to_same_value_is_legal(isolated_log):
-    """Cutting at the same N twice is legal at Story 11 (the lock for
-    state-changes-out-of-planned is Story 12)."""
+    """Cutting at the same N twice is legal under the relaxed lock when
+    the in-sprint cohort is terminal between cuts.
+
+    iter4-multisprint-v2 Story 1 cascade: resolve sids[0..2] to terminal
+    between the two cuts. (Under Iter 1's planned-allowed lock this was
+    legal with no state changes; under the relaxed terminal-only lock,
+    'still planned' blocks — so we resolve to terminal explicitly.)"""
     import sm
-    _seed_full(n_stories=5)
+    sids = _seed_full(n_stories=5)
     sm.sprint_cut(3)
-    # Second cut to the same value — must not raise (Story 11 contract).
+    _resolve_to_force_closed(sids[:3])
+    # Second cut to the same value — must not raise.
     sm.sprint_cut(3)
     state = sm.derive_state()
     assert state["sprint_cut"] == 3
@@ -646,10 +702,14 @@ def test_recut_to_same_value_is_legal(isolated_log):
 
 def test_recut_in_sprint_ids_track_latest(isolated_log):
     """The latest sprint_cut entry's in_sprint_story_ids reflects the
-    latest N — the older entries are inert on replay (Story 4 ignores them)."""
+    latest N — the older entries are inert on replay (Story 4 ignores them).
+
+    iter4-multisprint-v2 Story 1 cascade: terminal-resolve sids[0..1]
+    before the re-cut."""
     import sm
     sids = _seed_full(n_stories=6)
     sm.sprint_cut(2)
+    _resolve_to_force_closed(sids[:2])
     second = sm.sprint_cut(4)
     # Latest entry's content reflects N=4.
     assert second["in_sprint_story_ids"] == sids[:4]
@@ -1110,9 +1170,13 @@ def test_entry_timestamp_is_iso8601(isolated_log):
 
 
 def test_entry_id_differs_across_two_cuts(isolated_log):
-    """Each successful cut gets a fresh id — entry ids differ."""
+    """Each successful cut gets a fresh id — entry ids differ.
+
+    iter4-multisprint-v2 Story 1 cascade: terminal-resolve sids[0..1]
+    between the two cuts."""
     import sm
-    _seed_full(n_stories=6)
+    sids = _seed_full(n_stories=6)
     a = sm.sprint_cut(2)
+    _resolve_to_force_closed(sids[:2])
     b = sm.sprint_cut(4)
     assert a["id"] != b["id"]
