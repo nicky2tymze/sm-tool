@@ -618,9 +618,15 @@ def test_recut_3_then_5_replay_shows_5(isolated_log):
 
     iter4-multisprint-v2 Story 1 cascade: re-cut now requires the prior
     in-sprint cohort to be terminal. Resolve sids[0..2] to force_closed
-    before the second cut so the relaxed lock permits it."""
+    before the second cut so the relaxed lock permits it.
+
+    Story 3 cascade: under Story 3, sprint_cut(N) interprets N over
+    currently-planned only. After cut(3) + force-close, only 3 stories
+    remain planned on a 6-story backlog, so sprint_cut(5) is out of
+    range. Bump the backlog to 8 stories so 5 remain planned after the
+    first cut's cohort is terminal."""
     import sm
-    sids = _seed_full(n_stories=6)
+    sids = _seed_full(n_stories=8)
     sm.sprint_cut(3)
     _resolve_to_force_closed(sids[:3])
     sm.sprint_cut(5)
@@ -633,9 +639,13 @@ def test_recut_5_then_2_replay_shows_2(isolated_log):
     even when the new cut is smaller).
 
     iter4-multisprint-v2 Story 1 cascade: resolve the prior in-sprint
-    cohort (sids[0..4]) to terminal before the smaller re-cut."""
+    cohort (sids[0..4]) to terminal before the smaller re-cut.
+
+    Story 3 cascade: after force-closing 5 of 6 stories, only 1 remains
+    planned — sprint_cut(2) is out of range. Expand backlog to 8 so 3
+    remain planned after the first cut's cohort goes terminal."""
     import sm
-    sids = _seed_full(n_stories=6)
+    sids = _seed_full(n_stories=8)
     sm.sprint_cut(5)
     _resolve_to_force_closed(sids[:5])
     sm.sprint_cut(2)
@@ -647,9 +657,12 @@ def test_recut_writes_two_entries(isolated_log):
     """Each successful cut writes a new entry — re-cut does not erase.
 
     iter4-multisprint-v2 Story 1 cascade: terminal-resolve the in-sprint
-    cohort between cuts."""
+    cohort between cuts.
+
+    Story 3 cascade: bump the backlog to 8 so sprint_cut(5) remains valid
+    against currently-planned count after the first cut goes terminal."""
     import sm
-    sids = _seed_full(n_stories=6)
+    sids = _seed_full(n_stories=8)
     before = list(sm.read_entries())
     sm.sprint_cut(3)
     _resolve_to_force_closed(sids[:3])
@@ -665,21 +678,26 @@ def test_recut_many_times_latest_wins(isolated_log):
 
     iter4-multisprint-v2 Story 1 cascade: between each pair of cuts,
     terminal-resolve the in-sprint cohort so the relaxed lock permits
-    the next cut."""
+    the next cut.
+
+    Story 3 cascade: under Story 3, each sprint_cut(N) selects N of the
+    CURRENTLY-PLANNED tail (not the full backlog), so each cut's cohort
+    is exactly the next N planned stories. Resolve that cohort to terminal
+    before the next cut. Backlog stays at 8; chain cuts of (1,1,1,1,4)
+    which is well-defined under Story 3 semantics."""
     import sm
     sids = _seed_full(n_stories=8)
-    sm.sprint_cut(1)
-    _resolve_to_force_closed(sids[:1])
-    sm.sprint_cut(2)
-    # sids[0] already terminal; resolve sids[1] (the newly-added one).
+    sm.sprint_cut(1)  # cohort = [sids[0]]
+    _resolve_to_force_closed(sids[0:1])
+    sm.sprint_cut(1)  # cohort = [sids[1]]
     _resolve_to_force_closed(sids[1:2])
-    sm.sprint_cut(3)
+    sm.sprint_cut(1)  # cohort = [sids[2]]
     _resolve_to_force_closed(sids[2:3])
-    sm.sprint_cut(4)
+    sm.sprint_cut(1)  # cohort = [sids[3]]
     _resolve_to_force_closed(sids[3:4])
-    sm.sprint_cut(7)
+    sm.sprint_cut(4)  # cohort = sids[4..7]; cut_position = 4 under Story 3.
     state = sm.derive_state()
-    assert state["sprint_cut"] == 7
+    assert state["sprint_cut"] == 4
 
 
 def test_recut_to_same_value_is_legal(isolated_log):
@@ -689,9 +707,13 @@ def test_recut_to_same_value_is_legal(isolated_log):
     iter4-multisprint-v2 Story 1 cascade: resolve sids[0..2] to terminal
     between the two cuts. (Under Iter 1's planned-allowed lock this was
     legal with no state changes; under the relaxed terminal-only lock,
-    'still planned' blocks — so we resolve to terminal explicitly.)"""
+    'still planned' blocks — so we resolve to terminal explicitly.)
+
+    Story 3 cascade: under Story 3, sprint_cut(N) counts over currently-
+    planned. To allow cut(3) twice, the backlog must have 6 stories so
+    3 remain planned after the first cohort goes terminal."""
     import sm
-    sids = _seed_full(n_stories=5)
+    sids = _seed_full(n_stories=6)
     sm.sprint_cut(3)
     _resolve_to_force_closed(sids[:3])
     # Second cut to the same value — must not raise.
@@ -705,15 +727,21 @@ def test_recut_in_sprint_ids_track_latest(isolated_log):
     latest N — the older entries are inert on replay (Story 4 ignores them).
 
     iter4-multisprint-v2 Story 1 cascade: terminal-resolve sids[0..1]
-    before the re-cut."""
+    before the re-cut.
+
+    Story 3 cascade: under Story 3, the new cut's in_sprint contains only
+    the new cohort (first N currently-planned), and deferred contains
+    everything else — including the prior-cut terminal stories. So after
+    cut(2) + terminal-resolve and cut(4): in_sprint = sids[2:6],
+    deferred = sids[:2] (the terminal prior cohort)."""
     import sm
     sids = _seed_full(n_stories=6)
     sm.sprint_cut(2)
     _resolve_to_force_closed(sids[:2])
     second = sm.sprint_cut(4)
-    # Latest entry's content reflects N=4.
-    assert second["in_sprint_story_ids"] == sids[:4]
-    assert second["deferred_story_ids"] == sids[4:]
+    # Latest entry's content reflects the new cut's cohort under Story 3.
+    assert second["in_sprint_story_ids"] == sids[2:6]
+    assert second["deferred_story_ids"] == sids[:2]
 
 
 def test_recut_invalid_n_does_not_overwrite_prior(isolated_log):

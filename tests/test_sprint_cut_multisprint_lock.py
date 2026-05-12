@@ -238,13 +238,18 @@ def test_first_cut_succeeds_with_no_prior(isolated_log):
 def test_first_cut_succeeds_even_with_state_changes_on_log(isolated_log):
     """State_change entries can exist on the log before the first cut
     (e.g. for stories that aren't yet in any sprint set). The first
-    cut still proceeds unconditionally — the lock fires only on RE-cut."""
+    cut still proceeds unconditionally — the lock fires only on RE-cut.
+
+    Story 3 cascade: under Story 3, sprint_cut(N) counts over CURRENTLY-
+    PLANNED stories. The pre-cut state_change moves sids[0] out of
+    planned, so the currently-planned tail is sids[1..4]. sprint_cut(3)
+    selects the first 3 of that tail = sids[1..3]."""
     import sm
     sids = _seed_full(n_stories=5)
     _craft_state_change(sids[0], "planned", "in_progress")
     result = sm.sprint_cut(3)
     assert result["cut_position"] == 3
-    assert result["in_sprint_story_ids"] == sids[:3]
+    assert result["in_sprint_story_ids"] == sids[1:4]
 
 
 def test_first_cut_does_not_raise_locked_error(isolated_log):
@@ -286,9 +291,12 @@ def test_first_cut_records_cut_position_and_membership(isolated_log):
 
 
 def test_recut_allowed_when_all_in_sprint_accepted(isolated_log):
-    """All prior in-sprint stories accepted → re-cut accepted."""
+    """All prior in-sprint stories accepted → re-cut accepted.
+
+    Story 3 cascade: backlog expanded to 7 so 4 planned remain after the
+    first cohort goes terminal."""
     import sm
-    sids = _seed_full(n_stories=5)
+    sids = _seed_full(n_stories=7)
     sm.sprint_cut(3)  # in-sprint = sids[0..2]
     for sid in sids[:3]:
         _drive_to_accepted(sid)
@@ -309,9 +317,12 @@ def test_recut_allowed_when_all_in_sprint_rejected(isolated_log):
 
 
 def test_recut_allowed_when_all_in_sprint_force_closed(isolated_log):
-    """All prior in-sprint stories force_closed → re-cut accepted."""
+    """All prior in-sprint stories force_closed → re-cut accepted.
+
+    Story 3 cascade: backlog expanded to 8 so 5 planned remain after the
+    first cohort goes terminal."""
     import sm
-    sids = _seed_full(n_stories=5)
+    sids = _seed_full(n_stories=8)
     sm.sprint_cut(3)
     for sid in sids[:3]:
         _drive_to_force_closed(sid)
@@ -323,9 +334,12 @@ def test_recut_allowed_when_terminal_mix_accepted_and_rejected(
     isolated_log,
 ):
     """Mix of accepted + rejected in the prior in-sprint cohort →
-    re-cut accepted."""
+    re-cut accepted.
+
+    Story 3 cascade: backlog expanded to 9 so 5 planned remain after the
+    first 4 go terminal."""
     import sm
-    sids = _seed_full(n_stories=6)
+    sids = _seed_full(n_stories=9)
     sm.sprint_cut(4)
     _drive_to_accepted(sids[0])
     _drive_to_rejected(sids[1])
@@ -338,9 +352,12 @@ def test_recut_allowed_when_terminal_mix_accepted_and_rejected(
 def test_recut_allowed_when_terminal_mix_all_three_states(isolated_log):
     """Mix of accepted + rejected + force_closed in the prior in-sprint
     cohort → re-cut accepted. The three terminal states are
-    interchangeable for the lock check."""
+    interchangeable for the lock check.
+
+    Story 3 cascade: backlog expanded to 8 so 5 planned remain after the
+    first 3 go terminal."""
     import sm
-    sids = _seed_full(n_stories=6)
+    sids = _seed_full(n_stories=8)
     sm.sprint_cut(3)
     _drive_to_accepted(sids[0])
     _drive_to_rejected(sids[1])
@@ -351,9 +368,12 @@ def test_recut_allowed_when_terminal_mix_all_three_states(isolated_log):
 
 def test_recut_writes_new_sprint_cut_entry(isolated_log):
     """A successful re-cut after terminal resolution writes a new
-    sprint_cut entry (so two coexist on the log within one iteration)."""
+    sprint_cut entry (so two coexist on the log within one iteration).
+
+    Story 3 cascade: backlog expanded to 7 so 4 planned remain after the
+    first cohort goes terminal."""
     import sm
-    sids = _seed_full(n_stories=5)
+    sids = _seed_full(n_stories=7)
     sm.sprint_cut(3)
     for sid in sids[:3]:
         _drive_to_accepted(sid)
@@ -370,28 +390,34 @@ def test_recut_writes_new_sprint_cut_entry(isolated_log):
 
 def test_recut_in_sprint_membership_reflects_new_cut(isolated_log):
     """After a permitted re-cut, the new entry's in_sprint_story_ids
-    reflects the new N (the multisprint enabler — Story 11 cut_position
-    semantics preserved for this story)."""
+    reflects the new N (the multisprint enabler).
+
+    Story 3 cascade update: under Story 3 semantics, N is a count over
+    currently-planned stories, and `in_sprint_story_ids` contains only
+    the new cut's cohort. After cut(3) + force_closing sids[0..2], the
+    currently-planned tail is sids[3..5] (only 3 stories), so sprint_cut(5)
+    can't run on a 6-story backlog. Expand to 8 stories so 5 remain
+    planned after the first cut, and pin in_sprint to sids[3..7]."""
     import sm
-    sids = _seed_full(n_stories=6)
+    sids = _seed_full(n_stories=8)
     sm.sprint_cut(3)
     for sid in sids[:3]:
         _drive_to_force_closed(sid)
     second = sm.sprint_cut(5)
-    # Story 1 preserves current cut_position semantics — Story 3 will
-    # update them. For this story we pin only that the new entry's
-    # cut_position and membership are as Iter 1 produces.
     assert second["cut_position"] == 5
-    assert second["in_sprint_story_ids"] == sids[:5]
+    assert second["in_sprint_story_ids"] == sids[3:8]
 
 
 def test_recut_does_not_raise_locked_error_when_all_terminal(
     isolated_log,
 ):
     """Explicit assertion: re-cut after terminal resolution must NOT
-    raise SprintCutLockedError. Belt and suspenders for the relaxation."""
+    raise SprintCutLockedError. Belt and suspenders for the relaxation.
+
+    Story 3 cascade: backlog expanded to 7 so 4 planned remain after the
+    first cohort goes terminal."""
     import sm
-    sids = _seed_full(n_stories=5)
+    sids = _seed_full(n_stories=7)
     sm.sprint_cut(3)
     _drive_to_accepted(sids[0])
     _drive_to_rejected(sids[1])
@@ -402,9 +428,12 @@ def test_recut_does_not_raise_locked_error_when_all_terminal(
 
 def test_recut_returns_dict_with_canonical_fields(isolated_log):
     """The permitted re-cut returns a dict with build_entry's canonical
-    fields (id, type, timestamp)."""
+    fields (id, type, timestamp).
+
+    Story 3 cascade: backlog expanded to 7 so 4 planned remain after the
+    first cohort goes terminal."""
     import sm
-    sids = _seed_full(n_stories=5)
+    sids = _seed_full(n_stories=7)
     sm.sprint_cut(3)
     for sid in sids[:3]:
         _drive_to_accepted(sid)
@@ -419,9 +448,12 @@ def test_recut_allowed_when_all_terminal_via_force_close_from_in_review(
     isolated_log,
 ):
     """force_closed from in_review (legal per _VALID_TRANSITIONS) →
-    still terminal → re-cut accepted."""
+    still terminal → re-cut accepted.
+
+    Story 3 cascade: backlog expanded to 7 so 4 planned remain after the
+    first cohort goes terminal."""
     import sm
-    sids = _seed_full(n_stories=5)
+    sids = _seed_full(n_stories=7)
     sm.sprint_cut(3)
     for sid in sids[:3]:
         _craft_state_change(sid, "planned", "in_progress")
@@ -433,22 +465,26 @@ def test_recut_allowed_when_all_terminal_via_force_close_from_in_review(
 
 def test_recut_chain_with_terminal_resolution_each_round(isolated_log):
     """Multi-round multisprint: cut, resolve, recut, resolve, recut.
-    Each round resolves to terminal then re-cuts; all succeed."""
+    Each round resolves to terminal then re-cuts; all succeed.
+
+    Story 3 cascade update: under Story 3 semantics, N counts over
+    currently-planned stories only. The original (2, 4, 6) chain on a
+    6-story backlog overshoots once stories go terminal. Rewritten as
+    (2, 2, 2) on a 6-story backlog — each round takes the next 2
+    currently-planned stories."""
     import sm
     sids = _seed_full(n_stories=6)
-    # Round 1.
+    # Round 1: take sids[0..1].
     sm.sprint_cut(2)
     _drive_to_accepted(sids[0])
     _drive_to_accepted(sids[1])
-    # Round 2 — bigger cut.
-    sm.sprint_cut(4)
-    # sids[0..3] now in-sprint; sids[0..1] already terminal. Resolve
-    # sids[2..3] to terminal.
+    # Round 2: take next 2 currently-planned (sids[2..3]).
+    sm.sprint_cut(2)
     _drive_to_rejected(sids[2])
     _drive_to_force_closed(sids[3])
-    # Round 3 — even bigger cut.
-    result = sm.sprint_cut(6)
-    assert result["cut_position"] == 6
+    # Round 3: take final 2 currently-planned (sids[4..5]).
+    result = sm.sprint_cut(2)
+    assert result["cut_position"] == 2
 
 
 # ===========================================================================
@@ -489,7 +525,11 @@ def test_recut_blocked_when_one_planned(isolated_log):
 
     Setup: two prior in-sprint stories — one terminal, one still
     planned. The planned story alone must trigger the lock.
-    """
+
+    Story 3 cascade: cut N reduced from 4 to 2 so the range precondition
+    (which now operates over currently-planned count) doesn't preempt
+    the lock check. currently-planned = sids[2..4] = 3 stories; cut(2)
+    is in range, so the lock check fires on sids[2] (still planned)."""
     import sm
     sids = _seed_full(n_stories=5)
     sm.sprint_cut(3)
@@ -498,7 +538,7 @@ def test_recut_blocked_when_one_planned(isolated_log):
     _drive_to_rejected(sids[1])
     # sids[2] is still in `planned` (no state_change entry).
     with pytest.raises(sm.SprintCutLockedError):
-        sm.sprint_cut(4)
+        sm.sprint_cut(2)
 
 
 def test_recut_blocked_when_all_prior_still_planned(isolated_log):
@@ -521,7 +561,12 @@ def test_recut_blocked_when_all_prior_still_planned(isolated_log):
 
 def test_recut_blocked_when_mix_of_in_progress_and_terminal(isolated_log):
     """Mixed cohort: some terminal, some in_progress → lock fires
-    because at least one offender exists."""
+    because at least one offender exists.
+
+    Story 3 cascade: cut N reduced from 4 to 2 so the range precondition
+    doesn't preempt the lock check. currently-planned = sids[3..4]
+    (2 stories); cut(2) is in range, so the lock fires on sids[1]
+    (in_progress)."""
     import sm
     sids = _seed_full(n_stories=5)
     sm.sprint_cut(3)
@@ -529,7 +574,7 @@ def test_recut_blocked_when_mix_of_in_progress_and_terminal(isolated_log):
     _craft_state_change(sids[1], "planned", "in_progress")  # offender
     _drive_to_force_closed(sids[2])
     with pytest.raises(sm.SprintCutLockedError):
-        sm.sprint_cut(4)
+        sm.sprint_cut(2)
 
 
 def test_recut_blocked_when_mix_of_in_review_and_terminal(isolated_log):
@@ -665,31 +710,42 @@ def test_deferred_story_in_progress_does_not_lock(isolated_log):
     NOT in the latest sprint_cut's in_sprint_story_ids does not count
     toward the lock).
 
-    Setup: cut at 3 of 6; resolve sids[0..2] to accepted; transition
+    Setup: cut at 3 of 8; resolve sids[0..2] to accepted; transition
     a deferred story (sids[4]) to in_progress. Re-cut must succeed
     because only the latest in_sprint cohort is checked.
+
+    Story 3 cascade: backlog expanded from 6 to 8 because under Story 3
+    `sids[4]` (in_progress) no longer counts as currently-planned, so the
+    currently-planned tail needs to have at least 4 entries for cut(4) to
+    be in range.
     """
     import sm
-    sids = _seed_full(n_stories=6)
+    sids = _seed_full(n_stories=8)
     sm.sprint_cut(3)
     for sid in sids[:3]:
         _drive_to_accepted(sid)
     _craft_state_change(sids[4], "planned", "in_progress")
     # Re-cut must succeed — sids[4] is deferred per the latest cut.
+    # currently_planned tail = sids[3], sids[5], sids[6], sids[7] (4 stories).
     result = sm.sprint_cut(4)
     assert result["cut_position"] == 4
 
 
 def test_deferred_story_in_review_does_not_lock(isolated_log):
     """Same as above, but the deferred story is in in_review. Still
-    doesn't count toward the lock — only the in-sprint cohort matters."""
+    doesn't count toward the lock — only the in-sprint cohort matters.
+
+    Story 3 cascade: backlog expanded from 6 to 9 because under Story 3
+    `sids[5]` (in_review) no longer counts as currently-planned. The
+    currently-planned tail must hold at least 5 entries for cut(5)."""
     import sm
-    sids = _seed_full(n_stories=6)
+    sids = _seed_full(n_stories=9)
     sm.sprint_cut(3)
     for sid in sids[:3]:
         _drive_to_rejected(sid)
     _craft_state_change(sids[5], "planned", "in_progress")
     _craft_state_change(sids[5], "in_progress", "in_review")
+    # currently_planned tail = sids[3,4,6,7,8] (5 stories).
     result = sm.sprint_cut(5)
     assert result["cut_position"] == 5
 
@@ -700,37 +756,54 @@ def test_only_latest_prior_cut_in_sprint_set_counts(isolated_log):
     earlier cut's membership.
 
     Setup: cut(2) → resolve sids[0..1] to terminal → cut(4) [new
-    in-sprint = sids[0..3]] → transition sids[3] to in_progress →
-    re-cut blocked (sids[3] is in the LATEST cut's cohort)."""
-    import sm
-    sids = _seed_full(n_stories=6)
-    sm.sprint_cut(2)
-    _drive_to_accepted(sids[0])
-    _drive_to_accepted(sids[1])
-    sm.sprint_cut(4)  # latest cut: in-sprint = sids[0..3]
-    _craft_state_change(sids[2], "planned", "in_progress")
-    with pytest.raises(sm.SprintCutLockedError):
-        sm.sprint_cut(5)
+    in-sprint = sids[2..5] under Story 3] → transition sids[2] to
+    in_progress → re-cut blocked (sids[2] is in the LATEST cut's
+    cohort).
 
-
-def test_only_latest_cohort_checked_earlier_cohort_ignored(isolated_log):
-    """Mirror of above: when the LATEST cohort is all-terminal, an
-    earlier cohort's state is irrelevant.
-
-    cut(2) → resolve sids[0..1] → cut(4) [latest cohort = sids[0..3]]
-    → resolve sids[2..3] to terminal → re-cut allowed. sids[0..1] are
-    already terminal from before; sids[2..3] are now terminal too —
-    the LATEST cohort is fully resolved."""
+    Story 3 cascade: under Story 3 the second cut's in-sprint cohort
+    is sids[2..5] (first 4 currently-planned), and the third cut's N
+    must fit currently-planned count (3 after sids[2] goes
+    in_progress). Use cut(3) — in range, so the lock check fires on
+    sids[2]."""
     import sm
     sids = _seed_full(n_stories=6)
     sm.sprint_cut(2)
     _drive_to_accepted(sids[0])
     _drive_to_accepted(sids[1])
     sm.sprint_cut(4)
+    _craft_state_change(sids[2], "planned", "in_progress")
+    with pytest.raises(sm.SprintCutLockedError):
+        sm.sprint_cut(3)
+
+
+def test_only_latest_cohort_checked_earlier_cohort_ignored(isolated_log):
+    """Mirror of above: when the LATEST cohort is all-terminal, an
+    earlier cohort's state is irrelevant.
+
+    Under Story 3: cut(2) → resolve sids[0..1] → cut(4) [latest cohort
+    = sids[2..5] under Story 3] → resolve sids[2..5] to terminal →
+    re-cut allowed. sids[0..1] were terminal from round 1; sids[2..5]
+    are now terminal too — the LATEST cohort is fully resolved.
+
+    Story 3 cascade: under Story 3 the second cut's cohort is sids[2..5]
+    (not sids[0..3]), so all 4 of those must be resolved to terminal,
+    not just sids[2..3]. Backlog stays at 6; the third cut must be over
+    a non-empty currently-planned tail — after rounds 1+2, all 6 are
+    terminal, so we expand the backlog to 8 to leave 2 planned for
+    round 3."""
+    import sm
+    sids = _seed_full(n_stories=8)
+    sm.sprint_cut(2)
+    _drive_to_accepted(sids[0])
+    _drive_to_accepted(sids[1])
+    sm.sprint_cut(4)  # Story 3 cohort = sids[2..5]
     _drive_to_rejected(sids[2])
-    _drive_to_force_closed(sids[3])
-    result = sm.sprint_cut(6)
-    assert result["cut_position"] == 6
+    _drive_to_rejected(sids[3])
+    _drive_to_force_closed(sids[4])
+    _drive_to_force_closed(sids[5])
+    # currently_planned tail now = sids[6,7] (2 stories).
+    result = sm.sprint_cut(2)
+    assert result["cut_position"] == 2
 
 
 def test_no_active_iteration_takes_priority_over_lock(isolated_log):
@@ -889,9 +962,12 @@ def test_sprint_cut_locked_error_still_value_error(isolated_log):
 def test_two_sprints_in_one_iteration_round_trip(isolated_log):
     """The headline scenario: open iteration, cut, resolve, cut again,
     resolve again. Both sprint_cut entries land on the log. derive_state
-    surfaces a sprint_cut (Story 2 will pin the exact semantics)."""
+    surfaces a sprint_cut (Story 2 will pin the exact semantics).
+
+    Story 3 cascade: backlog bumped from 6 to 8 so 5 stories remain
+    currently-planned after the first cohort goes terminal."""
     import sm
-    sids = _seed_full(n_stories=6)
+    sids = _seed_full(n_stories=8)
     # First sprint.
     sm.sprint_cut(3)
     _drive_to_accepted(sids[0])
@@ -908,19 +984,26 @@ def test_two_sprints_in_one_iteration_round_trip(isolated_log):
 
 def test_three_sprints_in_one_iteration_round_trip(isolated_log):
     """Triple sprint within one iteration. Pin that the lock relaxation
-    scales beyond one re-cut."""
+    scales beyond one re-cut.
+
+    Story 3 cascade: under Story 3, each sprint_cut(N) selects N from
+    the currently-planned tail (not the full backlog). Backlog expanded
+    to 9, and chain rewritten as (2, 3, 4): cut(2) cohort=sids[0..1];
+    cut(3) cohort=sids[2..4]; cut(4) cohort=sids[5..8]. Each cohort is
+    fully resolved to terminal before the next cut."""
     import sm
-    sids = _seed_full(n_stories=8)
+    sids = _seed_full(n_stories=9)
     # Sprint 1.
-    sm.sprint_cut(2)
+    sm.sprint_cut(2)  # cohort = sids[0..1]
     _drive_to_accepted(sids[0])
     _drive_to_accepted(sids[1])
-    # Sprint 2 — cut grows; resolve only the newly-added stories.
-    sm.sprint_cut(4)
+    # Sprint 2.
+    sm.sprint_cut(3)  # cohort under Story 3 = sids[2..4]
     _drive_to_rejected(sids[2])
     _drive_to_force_closed(sids[3])
+    _drive_to_accepted(sids[4])
     # Sprint 3.
-    sm.sprint_cut(7)
+    sm.sprint_cut(4)  # cohort under Story 3 = sids[5..8]
     cuts = [e for e in sm.read_entries() if e.get("type") == "sprint_cut"]
     assert len(cuts) == 3, (
         f"expected 3 sprint_cut entries after two permitted re-cuts; "

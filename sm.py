@@ -2660,14 +2660,26 @@ def sprint_cut(n: int) -> dict:
             "no story backlog yet; run decompose first"
         )
 
-    L = len(backlog)
+    # iter4-multisprint-v2 Story 3 — N is a count over CURRENTLY-PLANNED
+    # stories (stories whose lifecycle state is "planned"), not the full
+    # backlog. Stories already in any non-planned state from prior cuts do
+    # NOT count toward N. When no prior cut exists, every backlog story is
+    # still planned, so currently_planned == backlog and behavior reduces
+    # to Iter 1 (first-cut math unchanged). The range precondition operates
+    # against currently_planned_count for the same reason.
+    story_states = state["story_states"]
+    currently_planned = [
+        s for s in backlog
+        if story_states.get(s["story_id"], "planned") == "planned"
+    ]
+    L = len(currently_planned)
     if n < 1:
         raise SprintCutError(
             f"position must be >= 1, got {n}"
         )
     if n > L:
         raise SprintCutError(
-            f"position {n} exceeds backlog length {L}"
+            f"position {n} exceeds currently-planned count {L}"
         )
 
     # iter4-multisprint-v2 Story 1 — re-cut lock relaxed to terminal-only.
@@ -2695,7 +2707,6 @@ def sprint_cut(n: int) -> dict:
             latest_prior_in_sprint = None
 
     if latest_prior_in_sprint is not None:
-        story_states = state["story_states"]
         _TERMINAL = {"accepted", "rejected", "force_closed"}
         offenders = [
             (sid, story_states.get(sid, "planned"))
@@ -2712,11 +2723,16 @@ def sprint_cut(n: int) -> dict:
                 f"{{accepted, rejected, force_closed}} before re-cutting"
             )
 
-    # Build the cut: stories 1..N in sprint, N+1..L deferred. derive_state
-    # already returns the backlog sorted by sequence, so slicing preserves
-    # sequence order.
-    in_sprint_ids = [s["story_id"] for s in backlog[:n]]
-    deferred_ids = [s["story_id"] for s in backlog[n:]]
+    # iter4-multisprint-v2 Story 3 — in_sprint = first N of CURRENTLY-PLANNED
+    # only (not full backlog). deferred = everything in the backlog NOT in
+    # the new cut — naturally includes both prior-cut terminal stories and
+    # planned stories beyond the new cut, in backlog sequence order.
+    in_sprint_ids = [s["story_id"] for s in currently_planned[:n]]
+    in_sprint_set = set(in_sprint_ids)
+    deferred_ids = [
+        s["story_id"] for s in backlog
+        if s["story_id"] not in in_sprint_set
+    ]
 
     entry = build_entry(
         "sprint_cut",
