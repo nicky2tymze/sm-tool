@@ -1,0 +1,13 @@
+{
+  "iteration_id": "sm-tool-iter4-multisprint",
+  "iteration_goal": "Relax sprint-cut lock to allow multiple sprint-cuts per iteration so the sprint layer carries real planning-batch semantics instead of being a dead ceremony layer. Built via dogfood mode (first real-SDK end-to-end test of iter3-autonomy req-1 + req-2 work).",
+  "requirements": [
+    {
+      "requirement_id": "req-1",
+      "title": "Relax sprint-cut lock to allow multi-sprint per iteration",
+      "description": "sprint-cut N currently rejects with 'sprint cut locked' if any story in the active iteration has left planned state. Relax this: sprint-cut rejects only if there are currently-active non-terminal in-sprint stories (in_progress, in_review). When all previously-cut in-sprint stories have reached terminal states (accepted, rejected, force_closed), a new sprint-cut is allowed. Each sprint-cut N writes a new sprint_cut log entry; append-only. derive_state accepts multiple sprint_cut entries and reports the LATEST as the active sprint. The cut_position semantic applies to currently-planned stories (already-cut + terminal stories don't count against N). Stories cut into earlier sprints stay in their terminal state. close_iteration continues to validate that every in-sprint story across all cuts is terminal. force_close unchanged. _HELP_TEXT for sprint-cut updated to reflect multi-cut semantics.",
+      "priority": "MUST",
+      "acceptance_criteria": "sprint-cut N accepts a new cut when all previously-cut stories are terminal; rejects when any in-sprint story is non-terminal (in_progress or in_review); derive_state uses the latest sprint_cut entry as the active sprint; multiple sprint_cut entries in one iteration accepted by replay; existing Iter 1 sprint-cut tests pass (with cascade-updates where intent is preserved); _HELP_TEXT updated."
+    }
+  ]
+}
